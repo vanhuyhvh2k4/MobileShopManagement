@@ -1,9 +1,16 @@
 import { supabase } from "./supabase";
-import type { BackupPayload, Customer, Expense, Part, PartImport, Phone, PhoneFault, Repair, RepairPart, Sale, Settings } from "./types";
+import type { AppLog, BackupPayload, Customer, DeletedRow, Expense, Part, PartImport, Phone, PhoneFault, Repair, RepairPart, Sale, Settings } from "./types";
 
 const selectAll = async <T>(table: string) => {
   if (!supabase) return [] as T[];
   const { data, error } = await supabase.from(table).select("*");
+  if (error) throw error;
+  return (data ?? []) as T[];
+};
+
+const selectActive = async <T>(table: string) => {
+  if (!supabase) return [] as T[];
+  const { data, error } = await supabase.from(table).select("*").is("deleted_at", null);
   if (error) throw error;
   return (data ?? []) as T[];
 };
@@ -26,9 +33,27 @@ export const deleteRemoteRow = async (table: string, id: string) => {
   if (error) throw error;
 };
 
+export const softDeleteRemoteRow = async (table: string, id: string) => {
+  if (!supabase) return;
+  const { error } = await supabase.from(table).update({ deleted_at: new Date().toISOString() }).eq("id", id);
+  if (error) throw error;
+};
+
+export const restoreRemoteRow = async (table: string, id: string) => {
+  if (!supabase) return;
+  const { error } = await supabase.from(table).update({ deleted_at: null }).eq("id", id);
+  if (error) throw error;
+};
+
 export const deleteRemoteWhere = async (table: string, column: string, value: string) => {
   if (!supabase) return;
   const { error } = await supabase.from(table).delete().eq(column, value);
+  if (error) throw error;
+};
+
+export const softDeleteRemoteWhere = async (table: string, column: string, value: string) => {
+  if (!supabase) return;
+  const { error } = await supabase.from(table).update({ deleted_at: new Date().toISOString() }).eq(column, value);
   if (error) throw error;
 };
 
@@ -46,6 +71,7 @@ export const phoneToRow = (phone: Phone) => ({
   seller_name: phone.sellerName ?? null,
   seller_phone: phone.sellerPhone ?? null,
   purchase_price: phone.purchasePrice,
+  purchase_deposit: phone.purchaseDeposit ?? 0,
   shipping_fee: phone.shippingFee ?? 0,
   purchase_date: phone.purchaseDate,
   status: phone.status,
@@ -71,6 +97,7 @@ const rowToPhone = (row: Record<string, unknown>): Phone => ({
   sellerName: row.seller_name ? String(row.seller_name) : undefined,
   sellerPhone: row.seller_phone ? String(row.seller_phone) : undefined,
   purchasePrice: Number(row.purchase_price ?? 0),
+  purchaseDeposit: Number(row.purchase_deposit ?? 0),
   shippingFee: Number(row.shipping_fee ?? 0),
   purchaseDate: String(row.purchase_date ?? ""),
   status: row.status as Phone["status"],
@@ -250,19 +277,75 @@ const rowToSettings = (row: Record<string, unknown>): Settings => ({
   darkMode: Boolean(row.dark_mode)
 });
 
+export const logToRow = (log: AppLog) => ({
+  id: log.id,
+  action: log.action,
+  entity_type: log.entityType,
+  entity_id: log.entityId ?? null,
+  message: log.message,
+  created_at: log.createdAt
+});
+
+const rowToLog = (row: Record<string, unknown>): AppLog => ({
+  id: String(row.id),
+  action: String(row.action ?? ""),
+  entityType: String(row.entity_type ?? ""),
+  entityId: row.entity_id ? String(row.entity_id) : undefined,
+  message: String(row.message ?? ""),
+  createdAt: String(row.created_at ?? "")
+});
+
+function deletedRowLabel(table: string, row: Record<string, unknown>) {
+  if (table === "phones") return `${row.brand ?? ""} ${row.model ?? ""}`.trim() || String(row.id);
+  if (table === "parts") return `${row.brand ? `${row.brand} - ` : ""}${row.name ?? ""}`.trim() || String(row.id);
+  if (table === "part_imports") return `Phiếu nhập ${row.quantity ?? 0} linh kiện`;
+  if (table === "customers") return `${row.name ?? ""} ${row.phone ?? ""}`.trim() || String(row.id);
+  if (table === "sales") return `Đơn bán ${row.sale_date ?? ""}`;
+  if (table === "repairs") return `Sửa chữa ${row.repair_date ?? ""}`;
+  if (table === "repair_parts") return `Linh kiện sửa chữa x${row.quantity ?? 0}`;
+  if (table === "phone_faults") return String(row.fault_name ?? row.id);
+  if (table === "expenses") return `${row.category ?? ""} ${row.amount ?? ""}`.trim() || String(row.id);
+  return String(row.id);
+}
+
+const trashTables = ["phones", "phone_faults", "repairs", "parts", "part_imports", "repair_parts", "expenses", "customers", "sales"];
+
 export async function fetchSupabaseData(): Promise<BackupPayload> {
   return {
-    phones: (await selectAll<Record<string, unknown>>("phones")).map(rowToPhone),
-    faults: (await selectAll<Record<string, unknown>>("phone_faults")).map(rowToFault),
-    repairs: (await selectAll<Record<string, unknown>>("repairs")).map(rowToRepair),
-    parts: (await selectAll<Record<string, unknown>>("parts")).map(rowToPart),
-    partImports: (await selectAll<Record<string, unknown>>("part_imports")).map(rowToPartImport),
-    repairParts: (await selectAll<Record<string, unknown>>("repair_parts")).map(rowToRepairPart),
-    expenses: (await selectAll<Record<string, unknown>>("expenses")).map(rowToExpense),
-    customers: (await selectAll<Record<string, unknown>>("customers")).map(rowToCustomer),
-    sales: (await selectAll<Record<string, unknown>>("sales")).map(rowToSale),
+    phones: (await selectActive<Record<string, unknown>>("phones")).map(rowToPhone),
+    faults: (await selectActive<Record<string, unknown>>("phone_faults")).map(rowToFault),
+    repairs: (await selectActive<Record<string, unknown>>("repairs")).map(rowToRepair),
+    parts: (await selectActive<Record<string, unknown>>("parts")).map(rowToPart),
+    partImports: (await selectActive<Record<string, unknown>>("part_imports")).map(rowToPartImport),
+    repairParts: (await selectActive<Record<string, unknown>>("repair_parts")).map(rowToRepairPart),
+    expenses: (await selectActive<Record<string, unknown>>("expenses")).map(rowToExpense),
+    customers: (await selectActive<Record<string, unknown>>("customers")).map(rowToCustomer),
+    sales: (await selectActive<Record<string, unknown>>("sales")).map(rowToSale),
     settings: (await selectAll<Record<string, unknown>>("settings")).map(rowToSettings)
   };
+}
+
+export async function fetchAppLogs() {
+  return (await selectAll<Record<string, unknown>>("app_logs")).map(rowToLog).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function fetchDeletedRows(): Promise<DeletedRow[]> {
+  if (!supabase) return [];
+  const rows: DeletedRow[] = [];
+  for (const table of trashTables) {
+    const { data, error } = await supabase.from(table).select("*").not("deleted_at", "is", null);
+    if (error) throw error;
+    for (const row of data ?? []) {
+      rows.push({
+        table,
+        id: String(row.id),
+        label: deletedRowLabel(table, row),
+        deletedAt: String(row.deleted_at),
+        row
+      });
+    }
+  }
+  return rows.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
 }
 
 export async function pushBackupToSupabase(payload: BackupPayload) {
@@ -276,6 +359,7 @@ export async function pushBackupToSupabase(payload: BackupPayload) {
   await upsertRows("customers", payload.customers.map(customerToRow));
   await upsertRows("sales", payload.sales.map(saleToRow));
   await upsertRows("settings", payload.settings.map(settingsToRow));
+  await upsertRows("app_logs", (payload.appLogs ?? []).map(logToRow));
 }
 
 export const remoteUpsert = {
@@ -287,5 +371,6 @@ export const remoteUpsert = {
   repairPart: (repairPart: RepairPart) => upsertRow("repair_parts", repairPartToRow(repairPart)),
   customer: (customer: Customer) => upsertRow("customers", customerToRow(customer)),
   sale: (sale: Sale) => upsertRow("sales", saleToRow(sale)),
-  settings: (settings: Settings) => upsertRow("settings", settingsToRow(settings))
+  settings: (settings: Settings) => upsertRow("settings", settingsToRow(settings)),
+  log: (log: AppLog) => upsertRow("app_logs", logToRow(log))
 };

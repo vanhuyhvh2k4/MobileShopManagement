@@ -1,22 +1,21 @@
 import {
   Boxes,
-  ChartNoAxesCombined,
   CircleDollarSign,
   Download,
+  Eye,
   LockKeyhole,
   LogOut,
   Moon,
   PackagePlus,
   PanelLeft,
+  Pencil,
   Plus,
   Search,
-  Settings as SettingsIcon,
   Smartphone,
   Sun,
+  Trash2,
   Upload,
-  Users,
-  Wrench,
-  X
+  Wrench
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -30,19 +29,24 @@ import {
   XAxis,
   YAxis
 } from "recharts";
-import type { ReactNode } from "react";
 import { buildMetrics, monthlySeries, phoneCost, saleProfit } from "../lib/calculations";
 import { supabase } from "../lib/supabase";
 import {
-  deleteRemoteRow,
   deleteRemoteWhere,
+  fetchAppLogs,
+  fetchDeletedRows,
   fetchSupabaseData,
   pushBackupToSupabase,
-  remoteUpsert
+  remoteUpsert,
+  restoreRemoteRow,
+  softDeleteRemoteRow,
+  softDeleteRemoteWhere
 } from "../lib/supabaseSync";
 import type {
+  AppLog,
   BackupPayload,
   Customer,
+  DeletedRow,
   Expense,
   Part,
   PartImport,
@@ -55,141 +59,43 @@ import type {
   SaleDeliveryStatus,
   Settings
 } from "../lib/types";
+import {
+  authSessionDeadlineKey,
+  defaultSettings,
+  deliveryStatuses,
+  deliveryStatusLabels,
+  entityTypeLabels,
+  logActionLabels,
+  loginDurationMs,
+  preRepairStatuses,
+  statusLabels,
+  statuses,
+  stockReservedRepairStatuses
+} from "../domain/constants";
+import { blankPart, blankPartImport, blankPhone } from "../domain/factories";
+import { applyPartQuantityDelta, getPhoneRepairPartUsage } from "../domain/repairInventory";
+import {
+  formatDateTimeText,
+  formatSaleDateTime,
+  normalizeCustomerIdentity,
+  paginate,
+  uniqueValues
+} from "../shared/helpers";
+import {
+  ActionMenu,
+  DataTable,
+  Labeled,
+  Modal,
+  MoneyInput,
+  NumericInput,
+  PaginationControls,
+  Stat,
+  StatusPill,
+  TrashSection
+} from "../shared/ui";
+import { PartDialog, PartImportDialog, PhoneDialog, RepairDialog } from "../features/dialogs";
+import { navItems, type View } from "./navigation";
 import { cn, currency, nowLocalDateTime, todayISO, uid } from "../lib/utils";
-
-const statuses: PhoneStatus[] = [
-  "Purchased",
-  "Waiting Repair",
-  "Repairing",
-  "Ready For Sale",
-  "Reserved",
-  "Sold"
-];
-
-const statusLabels: Record<PhoneStatus, string> = {
-  Purchased: "Đã mua",
-  "Waiting Repair": "Chờ sửa",
-  Repairing: "Đang sửa",
-  "Ready For Sale": "Sẵn sàng bán",
-  Reserved: "Đã giữ hàng",
-  Sold: "Đã bán"
-};
-
-const deliveryStatuses: SaleDeliveryStatus[] = ["pending_delivery", "delivered", "not_received"];
-
-const deliveryStatusLabels: Record<SaleDeliveryStatus, string> = {
-  pending_delivery: "Chờ vận chuyển",
-  delivered: "Đã giao",
-  not_received: "Không nhận hàng"
-};
-
-type View = "dashboard" | "phones" | "parts" | "partImports" | "sales" | "reports" | "customers" | "settings";
-
-const navItems: { id: View; label: string; icon: typeof Smartphone }[] = [
-  { id: "dashboard", label: "Tổng quan", icon: ChartNoAxesCombined },
-  { id: "phones", label: "Điện thoại", icon: Smartphone },
-  { id: "parts", label: "Linh kiện", icon: Boxes },
-  { id: "partImports", label: "Lịch sử nhập", icon: PackagePlus },
-  { id: "sales", label: "Bán hàng", icon: CircleDollarSign },
-  { id: "customers", label: "Khách hàng", icon: Users },
-  { id: "reports", label: "Báo cáo", icon: Download },
-  { id: "settings", label: "Cài đặt", icon: SettingsIcon }
-];
-
-const defaultSettings: Settings = {
-  id: "settings",
-  businessName: "Quản Lý Sửa Chữa Điện Thoại",
-  defaultWarranty: 3,
-  currency: "VND",
-  darkMode: false
-};
-
-const authSessionDeadlineKey = "phone-manager-auth-deadline";
-const loginDurationMs = 2 * 24 * 60 * 60 * 1000;
-
-const blankPhone = (): Phone => ({
-  id: uid("phone"),
-  imei1: "",
-  brand: "",
-  model: "",
-  purchasePrice: 0,
-  shippingFee: 0,
-  purchaseDate: todayISO(),
-  status: "Purchased",
-  updatedAt: new Date().toISOString()
-});
-
-const blankPart = (): Part => ({
-  id: uid("part"),
-  brand: "",
-  name: "",
-  category: "",
-  purchaseCost: 0,
-  quantity: 0,
-  minimumStock: 1
-});
-
-const blankPartImport = (part: Part): PartImport => ({
-  id: uid("partimport"),
-  partId: part.id,
-  quantity: 1,
-  unitCost: part.purchaseCost,
-  importDateTime: nowLocalDateTime(),
-  supplier: part.supplier,
-  notes: ""
-});
-
-function fileToDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
-}
-
-function uniqueValues(values: Array<string | undefined>) {
-  return Array.from(new Set(values.map((value) => value?.trim()).filter(Boolean) as string[])).sort((a, b) =>
-    a.localeCompare(b)
-  );
-}
-
-function isPartRecommendedForPhone(part: Part, phone: Phone) {
-  const haystack = [part.brand, part.compatibleModels, part.name, part.category].filter(Boolean).join(" ").toLowerCase();
-  return [phone.brand, phone.model].filter(Boolean).some((value) => haystack.includes(value.toLowerCase()));
-}
-
-function normalizeCustomerIdentity(value: string) {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function formatSaleDateTime(sale: Sale) {
-  if (!sale.saleDateTime) return sale.saleDate;
-  return formatDateTimeText(sale.saleDateTime, sale.saleDate);
-}
-
-function formatDateTimeText(value: string, fallback = value) {
-  if (!value) return fallback;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value.replace("T", " ");
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
-}
-
-function paginate<T>(items: T[], page: number, pageSize: number) {
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-  const safePage = Math.min(Math.max(1, page), totalPages);
-  return {
-    page: safePage,
-    totalPages,
-    items: items.slice((safePage - 1) * pageSize, safePage * pageSize)
-  };
-}
 
 function hasValidAuthDeadline() {
   try {
@@ -230,6 +136,8 @@ export function App() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [appLogs, setAppLogs] = useState<AppLog[]>([]);
+  const [deletedRows, setDeletedRows] = useState<DeletedRow[]>([]);
 
   function reportSyncError(error: unknown) {
     const message = error instanceof Error ? error.message : "Không rõ lỗi";
@@ -247,12 +155,52 @@ export function App() {
     setExpenses([]);
     setCustomers([]);
     setSales([]);
+    setAppLogs([]);
+    setDeletedRows([]);
     setSettings(defaultSettings);
     setQuery("");
     setPhoneDraft(null);
     setPartDraft(null);
     setPartImportDraft(null);
     setRepairPhone(null);
+  }
+
+  async function loadRemoteState() {
+    const payload = await fetchSupabaseData();
+    setPhones(payload.phones);
+    setFaults(payload.faults);
+    setRepairs(payload.repairs);
+    setParts(payload.parts);
+    setPartImports(payload.partImports ?? []);
+    setRepairParts(payload.repairParts);
+    setExpenses(payload.expenses);
+    setCustomers(payload.customers);
+    setSales(payload.sales);
+    setSettings({ ...(payload.settings[0] ?? defaultSettings), currency: "VND" });
+    setAppLogs((await fetchAppLogs()).slice(0, 100));
+    setDeletedRows(await fetchDeletedRows());
+  }
+
+  async function refreshAuditState() {
+    setAppLogs((await fetchAppLogs()).slice(0, 100));
+    setDeletedRows(await fetchDeletedRows());
+  }
+
+  async function writeLog(action: string, entityType: string, entityId: string | undefined, message: string) {
+    const log: AppLog = {
+      id: uid("log"),
+      action,
+      entityType,
+      entityId,
+      message,
+      createdAt: new Date().toISOString()
+    };
+    try {
+      await remoteUpsert.log(log);
+      setAppLogs((current) => [log, ...current].slice(0, 100));
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   useEffect(() => {
@@ -301,17 +249,7 @@ export function App() {
           setSyncMessage("Chưa cấu hình Supabase. App yêu cầu Supabase để đọc/ghi dữ liệu.");
           return;
         }
-        const payload = await fetchSupabaseData();
-        setPhones(payload.phones);
-        setFaults(payload.faults);
-        setRepairs(payload.repairs);
-        setParts(payload.parts);
-        setPartImports(payload.partImports ?? []);
-        setRepairParts(payload.repairParts);
-        setExpenses(payload.expenses);
-        setCustomers(payload.customers);
-        setSales(payload.sales);
-        setSettings({ ...(payload.settings[0] ?? defaultSettings), currency: "VND" });
+        await loadRemoteState();
         setSyncMessage("Đã đọc dữ liệu từ Supabase");
       } catch (error) {
         reportSyncError(error);
@@ -368,19 +306,43 @@ export function App() {
 
   const metrics = buildMetrics({ phones, repairs, repairParts, expenses, sales, parts });
   const chartData = monthlySeries(sales, phones, repairs, repairParts, expenses);
+  const trashFor = (tables: string[]) => deletedRows.filter((row) => tables.includes(row.table));
 
   async function savePhone(phone: Phone, faultNames: string[]) {
+    const existingPhone = phones.find((item) => item.id === phone.id);
+    const shouldCancelRepairParts =
+      existingPhone &&
+      stockReservedRepairStatuses.includes(existingPhone.status) &&
+      preRepairStatuses.includes(phone.status);
+    const cancelledRepairUsage = shouldCancelRepairParts ? getPhoneRepairPartUsage(phone.id, repairs, repairParts) : null;
+    const restoredParts = cancelledRepairUsage ? applyPartQuantityDelta(parts, cancelledRepairUsage.quantities, "increase") : [];
     const savedPhone = { ...phone, updatedAt: new Date().toISOString() };
     const faultsToSave = faultNames
       .map((faultName) => faultName.trim())
       .filter(Boolean)
       .map((faultName) => ({ id: uid("fault"), phoneId: phone.id, faultName }));
     try {
+      await Promise.all(restoredParts.map((part) => remoteUpsert.part(part)));
+      if (cancelledRepairUsage) {
+        await Promise.all(cancelledRepairUsage.repairIds.map((repairId) => softDeleteRemoteWhere("repair_parts", "repair_id", repairId)));
+        await softDeleteRemoteWhere("repairs", "phone_id", phone.id);
+      }
       await remoteUpsert.phone(savedPhone);
       await deleteRemoteWhere("phone_faults", "phone_id", phone.id);
       await Promise.all(faultsToSave.map((fault) => remoteUpsert.fault(fault)));
       setPhones((current) => [...current.filter((item) => item.id !== savedPhone.id), savedPhone]);
+      if (restoredParts.length > 0) {
+        setParts((current) => current.map((part) => restoredParts.find((restoredPart) => restoredPart.id === part.id) ?? part));
+      }
+      if (cancelledRepairUsage) {
+        setRepairs((current) => current.filter((repair) => repair.phoneId !== phone.id));
+        setRepairParts((current) => current.filter((repairPart) => !cancelledRepairUsage.repairIds.includes(repairPart.repairId)));
+      }
       setFaults((current) => [...current.filter((fault) => fault.phoneId !== phone.id), ...faultsToSave]);
+      await writeLog("save", "phones", savedPhone.id, `Lưu điện thoại ${savedPhone.brand} ${savedPhone.model}`);
+      if (restoredParts.length > 0) {
+        await writeLog("update", "parts", savedPhone.id, `Hoàn linh kiện khi đưa ${savedPhone.brand} ${savedPhone.model} về trạng thái trước sửa`);
+      }
       setSyncMessage("Đã ghi điện thoại lên Supabase");
       setPhoneDraft(null);
     } catch (error) {
@@ -389,9 +351,43 @@ export function App() {
   }
 
   async function savePart(part: Part) {
+    const existingPart = parts.find((item) => item.id === part.id);
+    const isNewPart = !existingPart;
+    const quantityDelta = Number(part.quantity || 0) - Number(existingPart?.quantity ?? 0);
+    const initialImport: PartImport | null =
+      isNewPart && Number(part.quantity || 0) > 0
+        ? {
+            id: uid("partimport"),
+            partId: part.id,
+            quantity: Number(part.quantity || 0),
+            unitCost: Number(part.purchaseCost || 0),
+            importDateTime: new Date().toISOString(),
+            supplier: part.supplier,
+            notes: part.notes ? `Nhập ban đầu: ${part.notes}` : "Nhập kho ban đầu"
+          }
+        : null;
+    const stockAdjustment: PartImport | null =
+      !isNewPart && quantityDelta !== 0
+        ? {
+            id: uid("partimport"),
+            partId: part.id,
+            quantity: quantityDelta,
+            unitCost: Number(part.purchaseCost || 0),
+            importDateTime: new Date().toISOString(),
+            supplier: part.supplier,
+            notes:
+              quantityDelta > 0
+                ? `Điều chỉnh tăng tồn kho từ ${existingPart?.quantity ?? 0} lên ${part.quantity}`
+                : `Điều chỉnh giảm tồn kho từ ${existingPart?.quantity ?? 0} xuống ${part.quantity}`
+          }
+        : null;
+    const historyEntry = initialImport ?? stockAdjustment;
     try {
       await remoteUpsert.part(part);
+      if (historyEntry) await remoteUpsert.partImport(historyEntry);
       setParts((current) => [...current.filter((item) => item.id !== part.id), part]);
+      if (historyEntry) setPartImports((current) => [historyEntry, ...current]);
+      await writeLog(isNewPart ? "create" : "update", "parts", part.id, `${isNewPart ? "Tạo" : "Cập nhật"} linh kiện ${part.name}`);
       setSyncMessage("Đã ghi linh kiện lên Supabase");
       setPartDraft(null);
     } catch (error) {
@@ -417,6 +413,7 @@ export function App() {
       await remoteUpsert.part(updatedPart);
       setPartImports((current) => [savedImport, ...current.filter((item) => item.id !== savedImport.id)]);
       setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      await writeLog("create", "part_imports", savedImport.id, `Nhập ${savedImport.quantity} ${part.name} vào kho`);
       setSyncMessage("Đã nhập linh kiện vào kho");
       setPartImportDraft(null);
     } catch (error) {
@@ -438,10 +435,12 @@ export function App() {
       supplier: remainingImports[0]?.supplier || part.supplier
     };
     try {
-      await deleteRemoteRow("part_imports", partImport.id);
+      await softDeleteRemoteRow("part_imports", partImport.id);
       await remoteUpsert.part(updatedPart);
       setPartImports((current) => current.filter((item) => item.id !== partImport.id));
       setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      await writeLog("delete", "part_imports", partImport.id, `Xoá phiếu nhập ${part.name}`);
+      await refreshAuditState();
       setSyncMessage("Đã xoá phiếu nhập linh kiện");
     } catch (error) {
       reportSyncError(error);
@@ -449,23 +448,47 @@ export function App() {
   }
 
   async function deletePhone(phone: Phone) {
-    if (!window.confirm(`Xoá ${phone.brand} ${phone.model}? Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`)) return;
     const phoneRepairs = repairs.filter((repair) => repair.phoneId === phone.id);
     const repairIds = phoneRepairs.map((repair) => repair.id);
+    const phoneRepairParts = repairParts.filter((repairPart) => repairIds.includes(repairPart.repairId));
+    const shouldReturnParts = !["Ready For Sale", "Reserved", "Sold"].includes(phone.status);
+    const returnedQuantities = phoneRepairParts.reduce<Record<string, number>>((acc, repairPart) => {
+      acc[repairPart.partId] = (acc[repairPart.partId] ?? 0) + repairPart.quantity;
+      return acc;
+    }, {});
+    const returnedPartCount = Object.values(returnedQuantities).reduce((sum, quantity) => sum + quantity, 0);
+    const confirmMessage = shouldReturnParts
+      ? `Xoá ${phone.brand} ${phone.model}? Máy chưa sửa xong nên hệ thống sẽ hoàn lại ${returnedPartCount} linh kiện đã chọn vào kho. Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`
+      : `Xoá ${phone.brand} ${phone.model}? Máy đã sửa xong/sẵn sàng bán hoặc đã bán nên hệ thống sẽ không hoàn lại linh kiện. Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`;
+    if (!window.confirm(confirmMessage)) return;
+    const restoredParts = shouldReturnParts
+      ? parts
+          .filter((part) => returnedQuantities[part.id])
+          .map((part) => ({
+            ...part,
+            quantity: part.quantity + returnedQuantities[part.id]
+          }))
+      : [];
     try {
-      await deleteRemoteWhere("sales", "phone_id", phone.id);
-      await deleteRemoteWhere("expenses", "phone_id", phone.id);
-      await deleteRemoteWhere("phone_faults", "phone_id", phone.id);
-      await Promise.all(repairIds.map((repairId) => deleteRemoteWhere("repair_parts", "repair_id", repairId)));
-      await deleteRemoteWhere("repairs", "phone_id", phone.id);
-      await deleteRemoteRow("phones", phone.id);
+      await Promise.all(restoredParts.map((part) => remoteUpsert.part(part)));
+      await softDeleteRemoteWhere("sales", "phone_id", phone.id);
+      await softDeleteRemoteWhere("expenses", "phone_id", phone.id);
+      await softDeleteRemoteWhere("phone_faults", "phone_id", phone.id);
+      await Promise.all(repairIds.map((repairId) => softDeleteRemoteWhere("repair_parts", "repair_id", repairId)));
+      await softDeleteRemoteWhere("repairs", "phone_id", phone.id);
+      await softDeleteRemoteRow("phones", phone.id);
       setPhones((current) => current.filter((item) => item.id !== phone.id));
       setFaults((current) => current.filter((fault) => fault.phoneId !== phone.id));
       setRepairs((current) => current.filter((repair) => repair.phoneId !== phone.id));
       setRepairParts((current) => current.filter((repairPart) => !repairIds.includes(repairPart.repairId)));
+      if (restoredParts.length > 0) {
+        setParts((current) => current.map((part) => restoredParts.find((restoredPart) => restoredPart.id === part.id) ?? part));
+      }
       setExpenses((current) => current.filter((expense) => expense.phoneId !== phone.id));
       setSales((current) => current.filter((sale) => sale.phoneId !== phone.id));
-      setSyncMessage("Đã xoá điện thoại trên Supabase");
+      await writeLog("delete", "phones", phone.id, `Xoá điện thoại ${phone.brand} ${phone.model}`);
+      await refreshAuditState();
+      setSyncMessage(shouldReturnParts ? "Đã xoá điện thoại và hoàn lại linh kiện vào kho" : "Đã xoá điện thoại, không hoàn linh kiện vì máy đã sửa xong");
     } catch (error) {
       reportSyncError(error);
     }
@@ -474,9 +497,12 @@ export function App() {
   async function deletePart(part: Part) {
     if (!window.confirm(`Xoá linh kiện "${part.name}" khỏi kho? Lịch sử sửa chữa cũ vẫn giữ đơn giá đã dùng.`)) return;
     try {
-      await deleteRemoteRow("parts", part.id);
+      await softDeleteRemoteRow("parts", part.id);
+      await softDeleteRemoteWhere("part_imports", "part_id", part.id);
       setParts((current) => current.filter((item) => item.id !== part.id));
       setPartImports((current) => current.filter((item) => item.partId !== part.id));
+      await writeLog("delete", "parts", part.id, `Xoá linh kiện ${part.name}`);
+      await refreshAuditState();
       setSyncMessage("Đã xoá linh kiện trên Supabase");
     } catch (error) {
       reportSyncError(error);
@@ -488,10 +514,12 @@ export function App() {
     try {
       const phone = phones.find((item) => item.id === sale.phoneId);
       const restoredPhone = phone ? { ...phone, status: "Ready For Sale" as const, updatedAt: new Date().toISOString() } : undefined;
-      await deleteRemoteRow("sales", sale.id);
+      await softDeleteRemoteRow("sales", sale.id);
       if (restoredPhone) await remoteUpsert.phone(restoredPhone);
       setSales((current) => current.filter((item) => item.id !== sale.id));
       if (restoredPhone) setPhones((current) => current.map((item) => (item.id === restoredPhone.id ? restoredPhone : item)));
+      await writeLog("delete", "sales", sale.id, "Xoá giao dịch bán hàng");
+      await refreshAuditState();
       setSyncMessage("Đã xoá giao dịch trên Supabase");
     } catch (error) {
       reportSyncError(error);
@@ -500,9 +528,12 @@ export function App() {
 
   async function deleteCustomer(customerId: string) {
     if (!window.confirm("Xoá khách hàng này? Các giao dịch bán hàng vẫn được giữ lại nhưng sẽ hiển thị khách hàng là không rõ.")) return;
+    const customer = customers.find((item) => item.id === customerId);
     try {
-      await deleteRemoteRow("customers", customerId);
+      await softDeleteRemoteRow("customers", customerId);
       setCustomers((current) => current.filter((customer) => customer.id !== customerId));
+      await writeLog("delete", "customers", customerId, `Xoá khách hàng ${customer?.name ?? customerId}`);
+      await refreshAuditState();
       setSyncMessage("Đã xoá khách hàng trên Supabase");
     } catch (error) {
       reportSyncError(error);
@@ -514,7 +545,66 @@ export function App() {
     setSettings(savedSettings);
     try {
       await remoteUpsert.settings(savedSettings);
+      await writeLog("update", "settings", savedSettings.id, "Cập nhật cài đặt hệ thống");
       setSyncMessage("Đã ghi cài đặt lên Supabase");
+    } catch (error) {
+      reportSyncError(error);
+    }
+  }
+
+  async function restoreDeletedRow(row: DeletedRow) {
+    if (!window.confirm(`Khôi phục "${row.label}" từ thùng rác?`)) return;
+    try {
+      if (row.table === "phones") {
+        const relatedRows = deletedRows.filter((deletedRow) => {
+          if (deletedRow.table === "phone_faults" || deletedRow.table === "repairs" || deletedRow.table === "expenses" || deletedRow.table === "sales") {
+            return String(deletedRow.row.phone_id ?? "") === row.id;
+          }
+          if (deletedRow.table === "repair_parts") {
+            return deletedRows.some(
+              (repairRow) =>
+                repairRow.table === "repairs" &&
+                String(repairRow.row.phone_id ?? "") === row.id &&
+                String(repairRow.row.id ?? "") === String(deletedRow.row.repair_id ?? "")
+            );
+          }
+          return false;
+        });
+        const shouldTakePartsAgain = !["Ready For Sale", "Reserved", "Sold"].includes(String(row.row.status ?? ""));
+        if (shouldTakePartsAgain) {
+          const restoredQuantities = relatedRows
+            .filter((relatedRow) => relatedRow.table === "repair_parts")
+            .reduce<Record<string, number>>((acc, relatedRow) => {
+              const partId = String(relatedRow.row.part_id ?? "");
+              if (!partId) return acc;
+              acc[partId] = (acc[partId] ?? 0) + Number(relatedRow.row.quantity ?? 0);
+              return acc;
+            }, {});
+          const updatedParts = parts
+            .filter((part) => restoredQuantities[part.id])
+            .map((part) => ({
+              ...part,
+              quantity: Math.max(0, part.quantity - restoredQuantities[part.id])
+            }));
+          await Promise.all(updatedParts.map((part) => remoteUpsert.part(part)));
+        }
+        await Promise.all(relatedRows.map((relatedRow) => restoreRemoteRow(relatedRow.table, relatedRow.id)));
+      }
+      if (row.table === "part_imports") {
+        const part = parts.find((item) => item.id === String(row.row.part_id));
+        if (part) {
+          await remoteUpsert.part({
+            ...part,
+            quantity: part.quantity + Number(row.row.quantity ?? 0),
+            purchaseCost: Number(row.row.unit_cost ?? part.purchaseCost),
+            supplier: row.row.supplier ? String(row.row.supplier) : part.supplier
+          });
+        }
+      }
+      await restoreRemoteRow(row.table, row.id);
+      await writeLog("restore", row.table, row.id, `Khôi phục ${row.label}`);
+      await loadRemoteState();
+      setSyncMessage("Đã khôi phục dữ liệu từ thùng rác");
     } catch (error) {
       reportSyncError(error);
     }
@@ -568,6 +658,7 @@ export function App() {
       });
       setSales((current) => [...current, sale]);
       if (soldPhone) setPhones((current) => current.map((item) => (item.id === soldPhone.id ? soldPhone : item)));
+      await writeLog("create", "sales", sale.id, `Tạo giao dịch bán hàng ${currency(sale.salePrice)}`);
       setSyncMessage("Đã ghi bán hàng lên Supabase");
     } catch (error) {
       reportSyncError(error);
@@ -589,7 +680,20 @@ export function App() {
       if (restoredPhone) await remoteUpsert.phone(restoredPhone);
       setSales((current) => current.map((item) => (item.id === sale.id ? updatedSale : item)));
       if (restoredPhone) setPhones((current) => current.map((item) => (item.id === restoredPhone.id ? restoredPhone : item)));
+      await writeLog("update", "sales", sale.id, `Cập nhật trạng thái vận chuyển: ${deliveryStatusLabels[deliveryStatus]}`);
       setSyncMessage("Đã cập nhật trạng thái vận chuyển");
+    } catch (error) {
+      reportSyncError(error);
+    }
+  }
+
+  async function updatePhoneStatus(phone: Phone, status: PhoneStatus, message: string) {
+    const updatedPhone = { ...phone, status, updatedAt: new Date().toISOString() };
+    try {
+      await remoteUpsert.phone(updatedPhone);
+      setPhones((current) => current.map((item) => (item.id === updatedPhone.id ? updatedPhone : item)));
+      await writeLog("update", "phones", phone.id, `${message}: ${phone.brand} ${phone.model}`);
+      setSyncMessage(message);
     } catch (error) {
       reportSyncError(error);
     }
@@ -609,7 +713,7 @@ export function App() {
     }));
     const savedPhone = {
       ...input.phone,
-      status: "Ready For Sale" as const,
+      status: "Waiting Repair" as const,
       updatedAt: new Date().toISOString()
     };
     const repairId = uid("repair");
@@ -638,6 +742,7 @@ export function App() {
       setRepairParts((current) => [...current, ...replacements]);
       setParts((current) => current.map((part) => updatedParts.find((updated) => updated.id === part.id) ?? part));
       setPhones((current) => current.map((phone) => (phone.id === savedPhone.id ? savedPhone : phone)));
+      await writeLog("create", "repairs", savedRepair.id, `Lưu thay linh kiện cho ${input.phone.brand} ${input.phone.model}`);
       setSyncMessage("Đã ghi sửa chữa lên Supabase");
       setRepairPhone(null);
     } catch (error) {
@@ -820,10 +925,15 @@ export function App() {
               faults={faults}
               repairs={repairs}
               repairParts={repairParts}
+              parts={parts}
               expenses={expenses}
               settings={settings}
+              deletedRows={trashFor(["phones"])}
               onEdit={setPhoneDraft}
               onRepair={setRepairPhone}
+              onReceive={(phone) => void updatePhoneStatus(phone, "Waiting Inspection", "Đã chuyển máy sang chờ kiểm tra")}
+              onRepairDone={(phone) => void updatePhoneStatus(phone, "Ready For Sale", "Đã chuyển máy sang sẵn sàng bán")}
+              onRestoreDeleted={restoreDeletedRow}
               onDelete={deletePhone}
             />
           )}
@@ -831,12 +941,22 @@ export function App() {
             <PartsView
               parts={parts}
               partImports={partImports}
+              deletedRows={trashFor(["parts"])}
               onEdit={setPartDraft}
               onImport={(part) => setPartImportDraft({ part, partImport: blankPartImport(part) })}
+              onRestoreDeleted={restoreDeletedRow}
               onDelete={deletePart}
             />
           )}
-          {view === "partImports" && <PartImportsView parts={parts} partImports={partImports} onDelete={deletePartImport} />}
+          {view === "partImports" && (
+            <PartImportsView
+              parts={parts}
+              partImports={partImports}
+              deletedRows={trashFor(["part_imports"])}
+              onRestoreDeleted={restoreDeletedRow}
+              onDelete={deletePartImport}
+            />
+          )}
           {view === "sales" && (
             <SalesView
               phones={phones}
@@ -846,12 +966,23 @@ export function App() {
               repairs={repairs}
               repairParts={repairParts}
               expenses={expenses}
+              deletedRows={trashFor(["sales"])}
               onDelete={deleteSale}
+              onRestoreDeleted={restoreDeletedRow}
               onUpdateDeliveryStatus={updateSaleDeliveryStatus}
               onSave={saveSale}
             />
           )}
-          {view === "customers" && <CustomersView customers={customers} sales={sales} phones={phones} onDelete={deleteCustomer} />}
+          {view === "customers" && (
+            <CustomersView
+              customers={customers}
+              sales={sales}
+              phones={phones}
+              deletedRows={trashFor(["customers"])}
+              onRestoreDeleted={restoreDeletedRow}
+              onDelete={deleteCustomer}
+            />
+          )}
           {view === "reports" && (
             <ReportsView
               phones={phones}
@@ -866,7 +997,12 @@ export function App() {
             />
           )}
           {view === "settings" && (
-            <SettingsView settings={settings} supabaseConfigured={Boolean(supabase)} onChange={updateSettings} />
+            <SettingsView
+              settings={settings}
+              supabaseConfigured={Boolean(supabase)}
+              appLogs={appLogs}
+              onChange={updateSettings}
+            />
           )}
         </section>
       </main>
@@ -1140,10 +1276,15 @@ function PhonesView(props: {
   faults: { phoneId: string; faultName: string }[];
   repairs: Repair[];
   repairParts: RepairPart[];
+  parts: Part[];
   expenses: Expense[];
   settings: Settings;
+  deletedRows: DeletedRow[];
   onEdit: (phone: Phone) => void;
   onRepair: (phone: Phone) => void;
+  onReceive: (phone: Phone) => void;
+  onRepairDone: (phone: Phone) => void;
+  onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (phone: Phone) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
@@ -1151,6 +1292,7 @@ function PhonesView(props: {
   const [modelFilter, setModelFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [repairFilter, setRepairFilter] = useState("all");
+  const [detailPhone, setDetailPhone] = useState<Phone | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const brands = uniqueValues(props.phones.map((phone) => phone.brand));
@@ -1295,22 +1437,41 @@ function PhonesView(props: {
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
                   <Stat label="Giá nhập" value={currency(phone.purchasePrice, props.settings.currency)} />
+                  <Stat label="Tiền cọc" value={currency(phone.purchaseDeposit ?? 0, props.settings.currency)} />
                   <Stat label="Vận chuyển" value={currency(phone.shippingFee ?? 0, props.settings.currency)} />
                   <Stat label="Chi phí thay" value={currency(replacementCost, props.settings.currency)} />
                   <Stat label="Tổng vốn" value={currency(totalCost, props.settings.currency)} />
                 </div>
                 <div className="mt-3 grid gap-2">
-                  <button className="btn-secondary w-full" onClick={() => props.onRepair(phone)}>
-                    <Wrench size={16} />
-                    Thay linh kiện
-                  </button>
+                  {phone.status === "Purchased" && (
+                    <button className="btn-secondary w-full" onClick={() => props.onReceive(phone)}>
+                      Đã nhận
+                    </button>
+                  )}
+                  {phone.status === "Waiting Inspection" && (
+                    <button className="btn-secondary w-full" onClick={() => props.onRepair(phone)}>
+                      <Wrench size={16} />
+                      Thay linh kiện
+                    </button>
+                  )}
+                  {(phone.status === "Waiting Repair" || phone.status === "Repairing") && (
+                    <button className="btn-secondary w-full" onClick={() => props.onRepairDone(phone)}>
+                      Sửa xong
+                    </button>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
-                    <button className="btn-secondary w-full" onClick={() => props.onEdit(phone)}>
-                      Sửa
+                    <button className="btn-secondary w-full" onClick={() => setDetailPhone(phone)}>
+                      <Eye size={16} />
+                      Chi tiết
                     </button>
-                    <button className="btn-secondary w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => props.onDelete(phone)}>
-                      Xoá
-                    </button>
+                    <ActionMenu
+                      label={`Thao tác ${phone.brand} ${phone.model}`}
+                      align="full"
+                      items={[
+                        { label: "Sửa", icon: <Pencil size={16} />, onClick: () => props.onEdit(phone) },
+                        { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => props.onDelete(phone) }
+                      ]}
+                    />
                   </div>
                 </div>
               </div>
@@ -1319,10 +1480,10 @@ function PhonesView(props: {
           {paginatedPhones.items.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Không có điện thoại phù hợp bộ lọc</div>}
         </div>
         <div className="hidden overflow-auto md:block">
-        <table className="w-full min-w-[1120px] text-sm">
+        <table className="w-full min-w-[1220px] text-sm">
           <thead className="bg-muted text-left">
             <tr>
-              {["Ảnh", "Điện thoại", "Tình trạng", "Lỗi", "Giá nhập", "Vận chuyển", "Chi phí thay", "Tổng vốn", ""].map((header) => (
+              {["Ảnh", "Điện thoại", "Tình trạng", "Lỗi", "Giá nhập", "Tiền cọc", "Vận chuyển", "Chi phí thay", "Tổng vốn", ""].map((header) => (
                 <th className="px-4 py-3 font-semibold" key={header}>
                   {header}
                 </th>
@@ -1373,21 +1534,39 @@ function PhonesView(props: {
                       .join(", ") || "Không có"}
                   </td>
                   <td className="px-4 py-3">{currency(phone.purchasePrice, props.settings.currency)}</td>
+                  <td className="px-4 py-3">{currency(phone.purchaseDeposit ?? 0, props.settings.currency)}</td>
                   <td className="px-4 py-3">{currency(phone.shippingFee ?? 0, props.settings.currency)}</td>
                   <td className="px-4 py-3">{currency(replacementCost, props.settings.currency)}</td>
                   <td className="px-4 py-3 font-semibold">{currency(totalCost, props.settings.currency)}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
-                      <button className="btn-secondary" onClick={() => props.onRepair(phone)}>
-                        <Wrench size={16} />
-                        Thay linh kiện
+                      {phone.status === "Purchased" && (
+                        <button className="btn-secondary" onClick={() => props.onReceive(phone)}>
+                          Đã nhận
+                        </button>
+                      )}
+                      {phone.status === "Waiting Inspection" && (
+                        <button className="btn-secondary" onClick={() => props.onRepair(phone)}>
+                          <Wrench size={16} />
+                          Thay linh kiện
+                        </button>
+                      )}
+                      {(phone.status === "Waiting Repair" || phone.status === "Repairing") && (
+                        <button className="btn-secondary" onClick={() => props.onRepairDone(phone)}>
+                          Sửa xong
+                        </button>
+                      )}
+                      <button className="btn-secondary" onClick={() => setDetailPhone(phone)}>
+                        <Eye size={16} />
+                        Chi tiết
                       </button>
-                      <button className="btn-secondary" onClick={() => props.onEdit(phone)}>
-                        Sửa
-                      </button>
-                      <button className="btn-secondary text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => props.onDelete(phone)}>
-                        Xoá
-                      </button>
+                      <ActionMenu
+                        label={`Thao tác ${phone.brand} ${phone.model}`}
+                        items={[
+                          { label: "Sửa", icon: <Pencil size={16} />, onClick: () => props.onEdit(phone) },
+                          { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => props.onDelete(phone) }
+                        ]}
+                      />
                     </div>
                   </td>
                 </tr>
@@ -1395,7 +1574,7 @@ function PhonesView(props: {
             })}
             {paginatedPhones.items.length === 0 && (
               <tr>
-                <td className="px-4 py-6 text-center text-slate-500" colSpan={9}>
+                <td className="px-4 py-6 text-center text-slate-500" colSpan={10}>
                   Không có điện thoại phù hợp bộ lọc
                 </td>
               </tr>
@@ -1412,6 +1591,193 @@ function PhonesView(props: {
           onPageSizeChange={setPageSize}
         />
       </div>
+      <TrashSection title="Thùng rác điện thoại" rows={props.deletedRows} onRestore={props.onRestoreDeleted} />
+      {detailPhone && (
+        <PhoneDetailModal
+          phone={detailPhone}
+          faults={props.faults.filter((fault) => fault.phoneId === detailPhone.id)}
+          repairs={props.repairs.filter((repair) => repair.phoneId === detailPhone.id)}
+          repairParts={props.repairParts}
+          parts={props.parts}
+          expenses={props.expenses.filter((expense) => expense.phoneId === detailPhone.id)}
+          settings={props.settings}
+          onAddRepair={() => {
+            setDetailPhone(null);
+            props.onRepair(detailPhone);
+          }}
+          onClose={() => setDetailPhone(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function PhoneDetailModal({
+  phone,
+  faults,
+  repairs,
+  repairParts,
+  parts,
+  expenses,
+  settings,
+  onAddRepair,
+  onClose
+}: {
+  phone: Phone;
+  faults: { faultName: string }[];
+  repairs: Repair[];
+  repairParts: RepairPart[];
+  parts: Part[];
+  expenses: Expense[];
+  settings: Settings;
+  onAddRepair: () => void;
+  onClose: () => void;
+}) {
+  const repairIds = new Set(repairs.map((repair) => repair.id));
+  const usedParts = repairParts.filter((repairPart) => repairIds.has(repairPart.repairId));
+  const partCost = usedParts.reduce((sum, repairPart) => sum + repairPart.quantity * repairPart.unitCost, 0);
+  const laborCost = repairs.reduce((sum, repair) => sum + repair.laborCost, 0);
+  const extraCost = expenses.reduce((sum, expense) => sum + expense.amount, 0);
+  const replacementCost = partCost + laborCost + extraCost;
+  const totalCost = phoneCost(phone, repairs, repairParts, expenses);
+  const images = [
+    ["Mặt trước", phone.imageFront],
+    ["Mặt sau", phone.imageBack],
+    ["IMEI", phone.imageImei],
+    ["Phụ kiện", phone.imageAccessories]
+  ].filter(([, src]) => src);
+
+  return (
+    <Modal title={`Chi tiết ${phone.brand} ${phone.model}`} onClose={onClose}>
+      <div className="grid gap-4 xl:grid-cols-[1.1fr_1.4fr]">
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {images.map(([label, src]) => (
+              <figure className="overflow-hidden rounded-lg border bg-background" key={label}>
+                <img className="h-48 w-full object-cover" src={src} alt={`${phone.brand} ${phone.model} ${label}`} />
+                <figcaption className="px-3 py-2 text-sm font-medium">{label}</figcaption>
+              </figure>
+            ))}
+            {images.length === 0 && (
+              <div className="flex h-48 items-center justify-center rounded-lg border bg-muted text-slate-400 sm:col-span-2">
+                <Smartphone size={36} />
+              </div>
+            )}
+          </div>
+          <div className="card p-4">
+            <h3 className="font-semibold">Tổng chi phí</h3>
+            <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+              <Stat label="Giá nhập" value={currency(phone.purchasePrice, settings.currency)} />
+              <Stat label="Tiền cọc" value={currency(phone.purchaseDeposit ?? 0, settings.currency)} />
+              <Stat label="Vận chuyển" value={currency(phone.shippingFee ?? 0, settings.currency)} />
+              <Stat label="Linh kiện" value={currency(partCost, settings.currency)} />
+              <Stat label="Công sửa" value={currency(laborCost, settings.currency)} />
+              <Stat label="Chi phí khác" value={currency(extraCost, settings.currency)} />
+              <Stat label="Tổng thay thế" value={currency(replacementCost, settings.currency)} />
+              <Stat label="Tổng vốn" value={currency(totalCost, settings.currency)} warn />
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="card p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-semibold">
+                  {phone.brand} {phone.model}
+                </h3>
+                <p className="text-sm text-slate-500">{[phone.color, phone.storage, phone.ram, phone.carrier].filter(Boolean).join(" - ") || "Chưa có cấu hình chi tiết"}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusPill status={phone.status} />
+                {phone.status !== "Sold" && (
+                  <button className="btn-secondary" type="button" onClick={onAddRepair}>
+                    <Wrench size={16} />
+                    Thêm linh kiện
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <DetailItem label="Người mua" value={phone.sellerName || "Chưa có"} />
+              <DetailItem label="SĐT người mua" value={phone.sellerPhone || "Chưa có"} />
+              <DetailItem label="Ngày nhập" value={phone.purchaseDate ? formatDateTimeText(phone.purchaseDate) : "Chưa có"} />
+              <DetailItem label="IMEI 1" value={phone.imei1 || "Chưa có"} />
+              <DetailItem label="IMEI 2" value={phone.imei2 || "Chưa có"} />
+              <DetailItem label="Phụ kiện" value={phone.accessories || "Chưa có"} />
+            </div>
+            {phone.notes && <p className="mt-3 rounded-md bg-muted p-3 text-sm">{phone.notes}</p>}
+          </div>
+
+          <div className="card p-4">
+            <h3 className="font-semibold">Tình trạng và sửa chữa</h3>
+            <div className="mt-3 space-y-3">
+              <div>
+                <p className="label">Lỗi ghi nhận</p>
+                <p className="text-sm">{faults.map((fault) => fault.faultName).join(", ") || "Không có"}</p>
+              </div>
+              <div>
+                <p className="label">Linh kiện đã chọn</p>
+                <div className="mt-2 max-h-56 space-y-2 overflow-auto pr-1">
+                  {usedParts.map((repairPart) => {
+                    const part = parts.find((item) => item.id === repairPart.partId);
+                    return (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-3" key={repairPart.id}>
+                        <div>
+                          <p className="font-medium">{part?.name ?? "Linh kiện không rõ"}</p>
+                          <p className="text-xs text-slate-500">{part?.brand || "Không rõ hãng"} - SL {repairPart.quantity}</p>
+                        </div>
+                        <span className="text-sm font-semibold">{currency(repairPart.quantity * repairPart.unitCost, settings.currency)}</span>
+                      </div>
+                    );
+                  })}
+                  {usedParts.length === 0 && <div className="py-3 text-sm text-slate-500">Chưa thay linh kiện.</div>}
+                </div>
+              </div>
+              <div>
+                <p className="label">Lịch sửa chữa</p>
+                <div className="mt-2 space-y-2">
+                  {repairs.map((repair) => (
+                    <div className="rounded-md border bg-background p-3" key={repair.id}>
+                      <div className="flex flex-wrap justify-between gap-2">
+                        <p className="font-medium">{repair.description || "Sửa chữa"}</p>
+                        <span className="text-sm font-semibold">{currency(repair.laborCost, settings.currency)}</span>
+                      </div>
+                      <p className="text-xs text-slate-500">{formatDateTimeText(repair.repairDate)}{repair.technician ? ` - ${repair.technician}` : ""}</p>
+                      {repair.notes && <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{repair.notes}</p>}
+                    </div>
+                  ))}
+                  {repairs.length === 0 && <div className="py-3 text-sm text-slate-500">Chưa có lịch sửa chữa.</div>}
+                </div>
+              </div>
+              <div>
+                <p className="label">Chi phí khác</p>
+                <div className="mt-2 space-y-2">
+                  {expenses.map((expense) => (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-background p-3" key={expense.id}>
+                      <div>
+                        <p className="font-medium">{expense.category}</p>
+                        <p className="text-xs text-slate-500">{expense.description || formatDateTimeText(expense.date)}</p>
+                      </div>
+                      <span className="text-sm font-semibold">{currency(expense.amount, settings.currency)}</span>
+                    </div>
+                  ))}
+                  {expenses.length === 0 && <div className="py-3 text-sm text-slate-500">Không có chi phí khác.</div>}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DetailItem({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-muted p-3">
+      <p className="label">{label}</p>
+      <p className="break-words text-sm font-medium">{value}</p>
     </div>
   );
 }
@@ -1419,14 +1785,18 @@ function PhonesView(props: {
 function PartsView({
   parts,
   partImports,
+  deletedRows,
   onEdit,
   onImport,
+  onRestoreDeleted,
   onDelete
 }: {
   parts: Part[];
   partImports: PartImport[];
+  deletedRows: DeletedRow[];
   onEdit: (part: Part) => void;
   onImport: (part: Part) => void;
+  onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (part: Part) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
@@ -1547,16 +1917,17 @@ function PartsView({
                     {imports.length === 0 && <p>Chưa có lịch sử nhập.</p>}
                   </div>
                 </details>
-                <div className="mt-3 grid grid-cols-3 gap-2">
+                <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
                   <button className="btn-secondary w-full" onClick={() => onImport(part)}>
                     Nhập
                   </button>
-                  <button className="btn-secondary w-full" onClick={() => onEdit(part)}>
-                    Sửa
-                  </button>
-                  <button className="btn-secondary w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
-                    Xoá
-                  </button>
+                  <ActionMenu
+                    label={`Thao tác ${part.name}`}
+                    items={[
+                      { label: "Sửa", icon: <Pencil size={16} />, onClick: () => onEdit(part) },
+                      { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(part) }
+                    ]}
+                  />
                 </div>
               </div>
             );
@@ -1612,12 +1983,13 @@ function PartsView({
                         <button className="btn-secondary h-9" onClick={() => onImport(part)}>
                           Nhập hàng
                         </button>
-                        <button className="btn-secondary h-9" onClick={() => onEdit(part)}>
-                          Sửa
-                        </button>
-                        <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
-                          Xoá
-                        </button>
+                        <ActionMenu
+                          label={`Thao tác ${part.name}`}
+                          items={[
+                            { label: "Sửa", icon: <Pencil size={16} />, onClick: () => onEdit(part) },
+                            { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(part) }
+                          ]}
+                        />
                       </div>
                     </td>
                   </tr>
@@ -1642,6 +2014,7 @@ function PartsView({
           onPageSizeChange={setPageSize}
         />
       </div>
+      <TrashSection title="Thùng rác linh kiện" rows={deletedRows} onRestore={onRestoreDeleted} />
     </div>
   );
 }
@@ -1649,10 +2022,14 @@ function PartsView({
 function PartImportsView({
   parts,
   partImports,
+  deletedRows,
+  onRestoreDeleted,
   onDelete
 }: {
   parts: Part[];
   partImports: PartImport[];
+  deletedRows: DeletedRow[];
+  onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (partImport: PartImport) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
@@ -1747,9 +2124,12 @@ function PartImportsView({
                 <p>Nhà cung cấp: {partImport.supplier || "-"}</p>
                 {partImport.notes && <p className="line-clamp-2">Ghi chú: {partImport.notes}</p>}
               </div>
-              <button className="btn-secondary mt-3 w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(partImport)}>
-                Xoá phiếu nhập
-              </button>
+              <div className="mt-3 flex justify-end">
+                <ActionMenu
+                  label="Thao tác phiếu nhập"
+                  items={[{ label: "Xoá phiếu nhập", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }]}
+                />
+              </div>
             </div>
           ))}
           {paginatedRows.items.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Chưa có phiếu nhập phù hợp bộ lọc</div>}
@@ -1779,9 +2159,10 @@ function PartImportsView({
                   <td className="px-4 py-3">{partImport.supplier || "-"}</td>
                   <td className="px-4 py-3">{partImport.notes || "-"}</td>
                   <td className="px-4 py-3 text-right">
-                    <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(partImport)}>
-                      Xoá
-                    </button>
+                    <ActionMenu
+                      label="Thao tác phiếu nhập"
+                      items={[{ label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }]}
+                    />
                   </td>
                 </tr>
               ))}
@@ -1804,6 +2185,7 @@ function PartImportsView({
           onPageSizeChange={setPageSize}
         />
       </div>
+      <TrashSection title="Thùng rác lịch sử nhập" rows={deletedRows} onRestore={onRestoreDeleted} />
     </div>
   );
 }
@@ -1816,7 +2198,9 @@ function SalesView({
   repairs,
   repairParts,
   expenses,
+  deletedRows,
   onDelete,
+  onRestoreDeleted,
   onUpdateDeliveryStatus,
   onSave
 }: {
@@ -1827,7 +2211,9 @@ function SalesView({
   repairs: Repair[];
   repairParts: RepairPart[];
   expenses: Expense[];
+  deletedRows: DeletedRow[];
   onDelete: (sale: Sale) => void;
+  onRestoreDeleted: (row: DeletedRow) => void;
   onUpdateDeliveryStatus: (sale: Sale, status: SaleDeliveryStatus) => void;
   onSave: (input: {
     phoneId: string;
@@ -1992,9 +2378,12 @@ function SalesView({
                     </option>
                   ))}
                 </select>
-                <button className="btn-secondary mt-3 w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(sale)}>
-                  Xoá
-                </button>
+                <div className="mt-3 flex justify-end">
+                  <ActionMenu
+                    label="Thao tác đơn bán"
+                    items={[{ label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(sale) }]}
+                  />
+                </div>
               </div>
             );
           })}
@@ -2038,9 +2427,10 @@ function SalesView({
                       </select>
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(sale)}>
-                        Xoá
-                      </button>
+                      <ActionMenu
+                        label="Thao tác đơn bán"
+                        items={[{ label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(sale) }]}
+                      />
                     </td>
                   </tr>
                 );
@@ -2049,6 +2439,7 @@ function SalesView({
           </table>
         </div>
       </div>
+      <TrashSection title="Thùng rác bán hàng" rows={deletedRows} onRestore={onRestoreDeleted} />
     </div>
   );
 }
@@ -2057,47 +2448,55 @@ function CustomersView({
   customers,
   sales,
   phones,
+  deletedRows,
+  onRestoreDeleted,
   onDelete
 }: {
   customers: Customer[];
   sales: Sale[];
   phones: Phone[];
+  deletedRows: DeletedRow[];
+  onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (customerId: string) => void;
 }) {
   return (
-    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-      {customers.map((customer) => {
-        const customerSales = sales.filter((sale) => sale.customerId === customer.id);
-        return (
-          <div className="card p-4" key={customer.id}>
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="font-semibold">{customer.name}</h3>
-                <p className="text-sm text-slate-500">{customer.phone}</p>
-                {customer.address && <p className="mt-1 line-clamp-2 text-sm text-slate-500">{customer.address}</p>}
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {customers.map((customer) => {
+          const customerSales = sales.filter((sale) => sale.customerId === customer.id);
+          return (
+            <div className="card p-4" key={customer.id}>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-semibold">{customer.name}</h3>
+                  <p className="text-sm text-slate-500">{customer.phone}</p>
+                  {customer.address && <p className="mt-1 line-clamp-2 text-sm text-slate-500">{customer.address}</p>}
+                </div>
+                <ActionMenu
+                  label={`Thao tác ${customer.name}`}
+                  items={[{ label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(customer.id) }]}
+                />
               </div>
-              <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(customer.id)}>
-                Xoá
-              </button>
+              <div className="mt-3 space-y-2 text-sm">
+                <p className="font-semibold">Lịch sử mua: {customerSales.length} đơn</p>
+                {customerSales.map((sale) => {
+                  const phone = phones.find((item) => item.id === sale.phoneId);
+                  return (
+                    <div className="rounded-md bg-muted p-2" key={sale.id}>
+                      <p className="font-medium">{phone ? `${phone.brand} ${phone.model}` : "Không rõ điện thoại"}</p>
+                      <p className="text-xs text-slate-500">
+                        {formatSaleDateTime(sale)} - {currency(sale.salePrice)} - Cọc {currency(sale.depositAmount)} - {deliveryStatusLabels[sale.deliveryStatus]}
+                      </p>
+                    </div>
+                  );
+                })}
+                {customerSales.length === 0 && <p className="text-slate-500">Chưa có giao dịch.</p>}
+              </div>
             </div>
-            <div className="mt-3 space-y-2 text-sm">
-              <p className="font-semibold">Lịch sử mua: {customerSales.length} đơn</p>
-              {customerSales.map((sale) => {
-                const phone = phones.find((item) => item.id === sale.phoneId);
-                return (
-                  <div className="rounded-md bg-muted p-2" key={sale.id}>
-                    <p className="font-medium">{phone ? `${phone.brand} ${phone.model}` : "Không rõ điện thoại"}</p>
-                    <p className="text-xs text-slate-500">
-                      {formatSaleDateTime(sale)} - {currency(sale.salePrice)} - Cọc {currency(sale.depositAmount)} - {deliveryStatusLabels[sale.deliveryStatus]}
-                    </p>
-                  </div>
-                );
-              })}
-              {customerSales.length === 0 && <p className="text-slate-500">Chưa có giao dịch.</p>}
-            </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      <TrashSection title="Thùng rác khách hàng" rows={deletedRows} onRestore={onRestoreDeleted} />
     </div>
   );
 }
@@ -2154,827 +2553,96 @@ function ReportsView(props: {
 function SettingsView({
   settings,
   supabaseConfigured,
+  appLogs,
   onChange
 }: {
   settings: Settings;
   supabaseConfigured: boolean;
+  appLogs: AppLog[];
   onChange: (settings: Settings) => void;
 }) {
+  const [logSearch, setLogSearch] = useState("");
+  const [logAction, setLogAction] = useState("all");
+  const [logEntityType, setLogEntityType] = useState("all");
+  const logActions = uniqueValues(appLogs.map((log) => log.action));
+  const logEntityTypes = uniqueValues(appLogs.map((log) => log.entityType));
+  const filteredLogs = appLogs.filter((log) => {
+    const text = [log.message, log.action, log.entityType, log.entityId, formatDateTimeText(log.createdAt)]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return (
+      text.includes(logSearch.toLowerCase()) &&
+      (logAction === "all" || log.action === logAction) &&
+      (logEntityType === "all" || log.entityType === logEntityType)
+    );
+  });
+
   return (
-    <form className="card max-w-2xl space-y-4 p-4">
-      <h2 className="text-lg font-semibold">Cài đặt</h2>
-      <Labeled label="Tên cửa hàng">
-        <input className="field" value={settings.businessName} onChange={(e) => onChange({ ...settings, businessName: e.target.value })} />
-      </Labeled>
-      <Labeled label="Tiền tệ">
-        <input className="field" value="VND" readOnly />
-      </Labeled>
-      <Labeled label="Bảo hành mặc định">
-        <NumericInput value={settings.defaultWarranty} onChange={(defaultWarranty) => onChange({ ...settings, defaultWarranty, currency: "VND" })} />
-      </Labeled>
-      <div className="rounded-md bg-muted p-3 text-sm">
-        Đồng bộ Supabase: {supabaseConfigured ? "Đã cấu hình" : "Thêm VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY để bật phần kết nối đồng bộ đám mây."}
-      </div>
-    </form>
-  );
-}
-
-function PhoneDialog({
-  phone,
-  phones,
-  faults,
-  onClose,
-  onSave
-}: {
-  phone: Phone;
-  phones: Phone[];
-  faults: { faultName: string }[];
-  onClose: () => void;
-  onSave: (phone: Phone, faultNames: string[]) => void;
-}) {
-  const [draft, setDraft] = useState(phone);
-  const [faultText, setFaultText] = useState(faults.map((fault) => fault.faultName).join(", "));
-  const brandOptions = uniqueValues(phones.map((item) => item.brand));
-  const modelOptions = uniqueValues(
-    phones
-      .filter((item) => !draft.brand || item.brand.toLowerCase() === draft.brand.toLowerCase())
-      .map((item) => item.model)
-  );
-  return (
-    <Modal title="Nhập hàng điện thoại cũ" onClose={onClose}>
-      <form
-        className="grid gap-3 md:grid-cols-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onSave(
-            draft.status === "Purchased" && faultText.trim() ? { ...draft, status: "Waiting Repair" } : draft,
-            faultText.split(",")
-          );
-        }}
-      >
-        <SuggestInput
-          label="Hãng"
-          value={draft.brand}
-          options={brandOptions}
-          listId="phone-brand-options"
-          placeholder="Chọn hãng có sẵn hoặc nhập hãng mới"
-          onChange={(brand) => setDraft({ ...draft, brand })}
-          required
-        />
-        <SuggestInput
-          label="Model"
-          value={draft.model}
-          options={modelOptions}
-          listId="phone-model-options"
-          placeholder="Chọn model có sẵn hoặc nhập model mới"
-          onChange={(model) => setDraft({ ...draft, model })}
-          required
-        />
-        <Input label="Tên người mua" value={draft.sellerName ?? ""} onChange={(sellerName) => setDraft({ ...draft, sellerName })} required />
-        <MoneyInput label="Giá mua" value={draft.purchasePrice} onChange={(purchasePrice) => setDraft({ ...draft, purchasePrice })} />
-        <MoneyInput label="Phí vận chuyển" value={draft.shippingFee ?? 0} onChange={(shippingFee) => setDraft({ ...draft, shippingFee })} />
-        <label className="md:col-span-2">
-          <span className="label">Tình trạng</span>
-          <textarea
-            className="field min-h-20 py-3"
-            value={faultText}
-            onChange={(e) => setFaultText(e.target.value)}
-            placeholder="Ví dụ: vỡ màn hình, pin yếu, lỗi camera"
-          />
-        </label>
-        <label className="md:col-span-2">
-          <span className="label">Ảnh sản phẩm</span>
-          <div className="mt-1 grid gap-3 rounded-lg border bg-background p-3 md:grid-cols-[160px_1fr]">
-            {draft.imageFront ? (
-              <img className="h-36 w-full rounded-md object-cover" src={draft.imageFront} alt={`${draft.brand} ${draft.model}`} />
-            ) : (
-              <div className="flex h-36 items-center justify-center rounded-md bg-muted text-slate-400">
-                <Smartphone size={32} />
-              </div>
-            )}
-            <div className="flex flex-col justify-center gap-2">
-              <input
-                className="field pt-2"
-                type="file"
-                accept="image/*"
-                onChange={async (event) => {
-                  const file = event.target.files?.[0];
-                  if (!file) return;
-                  setDraft({ ...draft, imageFront: await fileToDataUrl(file) });
-                }}
-              />
-              <p className="text-sm text-slate-500">Ảnh được lưu trong dữ liệu offline và sẽ đi kèm khi sao lưu JSON.</p>
-            </div>
-          </div>
-        </label>
-        <label className="md:col-span-2">
-          <span className="label">Ghi chú</span>
-          <textarea className="field min-h-24 py-3" value={draft.notes ?? ""} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />
-        </label>
-        <div className="grid gap-3 rounded-lg border bg-muted/40 p-3 md:col-span-2 md:grid-cols-2">
-          <Input label="IMEI 1 tùy chọn" value={draft.imei1} onChange={(imei1) => setDraft({ ...draft, imei1 })} />
-          <Input label="IMEI 2 tùy chọn" value={draft.imei2 ?? ""} onChange={(imei2) => setDraft({ ...draft, imei2 })} />
-          <Input label="Ngày mua" type="date" value={draft.purchaseDate} onChange={(purchaseDate) => setDraft({ ...draft, purchaseDate })} />
-          <Labeled label="Trạng thái">
-            <select className="field" value={draft.status} onChange={(e) => setDraft({ ...draft, status: e.target.value as PhoneStatus })}>
-              {statuses.map((status) => (
-                <option key={status} value={status}>
-                  {statusLabels[status]}
-                </option>
-              ))}
-            </select>
-          </Labeled>
-          <Input label="Màu sắc" value={draft.color ?? ""} onChange={(color) => setDraft({ ...draft, color })} />
-          <Input label="Dung lượng" value={draft.storage ?? ""} onChange={(storage) => setDraft({ ...draft, storage })} />
-        </div>
-        <div className="flex justify-end gap-2 md:col-span-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Hủy
-          </button>
-          <button className="btn-primary">Lưu</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function RepairDialog({
-  phone,
-  parts,
-  repairs,
-  repairParts,
-  expenses,
-  settings,
-  onClose,
-  onSave
-}: {
-  phone: Phone;
-  parts: Part[];
-  repairs: Repair[];
-  repairParts: RepairPart[];
-  expenses: Expense[];
-  settings: Settings;
-  onClose: () => void;
-  onSave: (input: {
-    phone: Phone;
-    description: string;
-    technician: string;
-    laborCost: number;
-    notes: string;
-    selectedParts: { part: Part; quantity: number }[];
-  }) => void;
-}) {
-  const [description, setDescription] = useState("Thay linh kiện hư hỏng");
-  const [technician, setTechnician] = useState("");
-  const [laborCost, setLaborCost] = useState(0);
-  const [notes, setNotes] = useState("");
-  const [quantities, setQuantities] = useState<Record<string, number>>({});
-  const [partSearch, setPartSearch] = useState("");
-  const [brandFilter, setBrandFilter] = useState("all");
-  const [categoryFilter, setCategoryFilter] = useState("all");
-  const [stockFilter, setStockFilter] = useState("available");
-  const [compatibleOnly, setCompatibleOnly] = useState(true);
-  const brands = uniqueValues(parts.map((part) => part.brand));
-  const categories = uniqueValues(parts.map((part) => part.category));
-  const selectedParts = parts
-    .map((part) => ({ part, quantity: quantities[part.id] ?? 0 }))
-    .filter((item) => item.quantity > 0);
-  const filteredParts = parts
-    .filter((part) => {
-      const text = [part.brand, part.name, part.category, part.compatibleModels, part.supplier, part.notes]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-      const matchesSearch = text.includes(partSearch.toLowerCase());
-      const matchesBrand = brandFilter === "all" || part.brand === brandFilter;
-      const matchesCategory = categoryFilter === "all" || part.category === categoryFilter;
-      const matchesStock =
-        stockFilter === "all" ||
-        (stockFilter === "available" && part.quantity > 0) ||
-        (stockFilter === "low" && part.quantity <= part.minimumStock);
-      const matchesCompatibility = !compatibleOnly || isPartRecommendedForPhone(part, phone);
-      return matchesSearch && matchesBrand && matchesCategory && matchesStock && matchesCompatibility;
-    })
-    .sort((a, b) => {
-      const selectedDelta = Number((quantities[b.id] ?? 0) > 0) - Number((quantities[a.id] ?? 0) > 0);
-      if (selectedDelta) return selectedDelta;
-      const recommendedDelta = Number(isPartRecommendedForPhone(b, phone)) - Number(isPartRecommendedForPhone(a, phone));
-      if (recommendedDelta) return recommendedDelta;
-      return `${a.brand ?? ""} ${a.category} ${a.name}`.localeCompare(`${b.brand ?? ""} ${b.category} ${b.name}`);
-    });
-  const currentCost = phoneCost(phone, repairs, repairParts, expenses);
-  const selectedPartCost = selectedParts.reduce((sum, item) => sum + item.part.purchaseCost * item.quantity, 0);
-  const newTotalCost = currentCost + selectedPartCost + Number(laborCost || 0);
-  return (
-    <Modal title={`Thay linh kiện - ${phone.brand} ${phone.model}`} onClose={onClose}>
-      <form
-        className="space-y-4"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onSave({
-            phone,
-            description,
-            technician,
-            laborCost: Number(laborCost || 0),
-            notes,
-            selectedParts
-          });
-        }}
-      >
-        <div className="grid gap-3 md:grid-cols-3">
-          <Stat label="Giá nhập máy" value={currency(phone.purchasePrice, settings.currency)} />
-          <Stat label="Chi phí hiện tại" value={currency(currentCost, settings.currency)} />
-          <Stat label="Tổng vốn sau thay" value={currency(newTotalCost, settings.currency)} />
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2">
-          <Input label="Nội dung sửa chữa" value={description} onChange={setDescription} required />
-          <Input label="Kỹ thuật viên" value={technician} onChange={setTechnician} />
-          <MoneyInput label="Công sửa" value={laborCost} onChange={setLaborCost} />
-          <label>
-            <span className="label">Ghi chú sửa chữa</span>
-            <textarea className="field min-h-20 py-3" value={notes} onChange={(event) => setNotes(event.target.value)} />
-          </label>
-        </div>
-
-        <div className="rounded-lg border bg-muted/30 p-3">
-          <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
-            <input
-              className="field"
-              value={partSearch}
-              onChange={(event) => setPartSearch(event.target.value)}
-              placeholder="Tìm linh kiện, hãng, model tương thích"
-            />
-            <select className="field" value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}>
-              <option value="all">Tất cả hãng</option>
-              {brands.map((brand) => (
-                <option key={brand} value={brand}>
-                  {brand}
-                </option>
-              ))}
-            </select>
-            <select className="field" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
-              <option value="all">Tất cả danh mục</option>
-              {categories.map((category) => (
-                <option key={category} value={category}>
-                  {category}
-                </option>
-              ))}
-            </select>
-            <select className="field" value={stockFilter} onChange={(event) => setStockFilter(event.target.value)}>
-              <option value="available">Chỉ còn hàng</option>
-              <option value="all">Tất cả tồn kho</option>
-              <option value="low">Sắp hết</option>
-            </select>
-          </div>
-          <label className="mt-3 flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={compatibleOnly}
-              onChange={(event) => setCompatibleOnly(event.target.checked)}
-            />
-            Ưu tiên chỉ hiện linh kiện khớp hãng/model máy đang sửa
-          </label>
-        </div>
-
-        {selectedParts.length > 0 && (
-          <div className="rounded-lg border border-primary/30 bg-primary/10 p-3">
-            <p className="mb-2 text-sm font-semibold">Linh kiện đã chọn</p>
-            <div className="flex flex-wrap gap-2">
-              {selectedParts.map(({ part, quantity }) => (
-                <span className="inline-flex items-center gap-2 rounded-md bg-card px-2 py-1 text-sm" key={part.id}>
-                  <span>
-                    {part.brand ? `${part.brand} - ` : ""}
-                    {part.name} x{quantity}
-                  </span>
-                  <button
-                    type="button"
-                    className="inline-flex h-6 w-6 items-center justify-center rounded-md border hover:bg-muted"
-                    aria-label={`Bỏ chọn ${part.name}`}
-                    onClick={() => setQuantities({ ...quantities, [part.id]: 0 })}
-                  >
-                    <X size={14} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="overflow-hidden rounded-lg border">
-          <div className="max-h-[46vh] overflow-auto">
-          <table className="w-full min-w-[980px] text-sm">
-            <thead className="sticky top-0 z-10 bg-muted text-left">
-              <tr>
-                {["Gợi ý", "Hãng", "Linh kiện", "Danh mục", "Tương thích", "Tồn kho", "Giá nhập", "Số lượng thay", "Thành tiền"].map((header) => (
-                  <th className="px-4 py-3 font-semibold" key={header}>
-                    {header}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filteredParts.map((part) => {
-                const quantity = quantities[part.id] ?? 0;
-                const recommended = isPartRecommendedForPhone(part, phone);
-                return (
-                  <tr className="border-t" key={part.id}>
-                    <td className="px-4 py-3">
-                      {recommended ? (
-                        <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">
-                          Khớp máy
-                        </span>
-                      ) : (
-                        "-"
-                      )}
-                    </td>
-                    <td className="px-4 py-3 font-medium">{part.brand || "-"}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{part.name}</div>
-                      <div className="text-xs text-slate-500">{part.supplier || "Chưa có nhà cung cấp"}</div>
-                    </td>
-                    <td className="px-4 py-3">{part.category}</td>
-                    <td className="px-4 py-3">{part.compatibleModels || "-"}</td>
-                    <td className={cn("px-4 py-3 font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
-                      {part.quantity}
-                    </td>
-                    <td className="px-4 py-3">{currency(part.purchaseCost, settings.currency)}</td>
-                    <td className="px-4 py-3">
-                      <input
-                        className="field h-9 max-w-28"
-                        type="text"
-                        inputMode="numeric"
-                        min={0}
-                        max={part.quantity}
-                        value={quantity === 0 ? "" : String(quantity)}
-                        onChange={(event) =>
-                          setQuantities({
-                            ...quantities,
-                            [part.id]: Math.min(part.quantity, Math.max(0, Number(event.target.value.replace(/\D/g, ""))))
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="px-4 py-3 font-medium">
-                      {quantity > 0 ? currency(quantity * part.purchaseCost, settings.currency) : "-"}
-                    </td>
-                  </tr>
-                );
-              })}
-              {filteredParts.length === 0 && (
-                <tr>
-                  <td className="px-4 py-6 text-center text-slate-500" colSpan={9}>
-                    Không có linh kiện phù hợp bộ lọc
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-          </div>
-        </div>
-
+    <div className="space-y-4">
+      <form className="card max-w-2xl space-y-4 p-4">
+        <h2 className="text-lg font-semibold">Cài đặt</h2>
+        <Labeled label="Tên cửa hàng">
+          <input className="field" value={settings.businessName} onChange={(e) => onChange({ ...settings, businessName: e.target.value })} />
+        </Labeled>
+        <Labeled label="Tiền tệ">
+          <input className="field" value="VND" readOnly />
+        </Labeled>
+        <Labeled label="Bảo hành mặc định">
+          <NumericInput value={settings.defaultWarranty} onChange={(defaultWarranty) => onChange({ ...settings, defaultWarranty, currency: "VND" })} />
+        </Labeled>
         <div className="rounded-md bg-muted p-3 text-sm">
-          Giá bán đề xuất sẽ bổ sung sau. Hiện tại hệ thống chỉ tính tổng vốn để bạn tự quyết định giá bán ra.
-        </div>
-
-        <div className="flex justify-end gap-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Hủy
-          </button>
-          <button className="btn-primary" disabled={selectedParts.length === 0 && Number(laborCost || 0) === 0}>
-            Lưu thay linh kiện
-          </button>
+          Đồng bộ Supabase: {supabaseConfigured ? "Đã cấu hình" : "Thêm VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY để bật phần kết nối đồng bộ đám mây."}
         </div>
       </form>
-    </Modal>
-  );
-}
 
-function PartDialog({
-  part,
-  parts,
-  onClose,
-  onSave
-}: {
-  part: Part;
-  parts: Part[];
-  onClose: () => void;
-  onSave: (part: Part) => void;
-}) {
-  const [draft, setDraft] = useState(part);
-  const brandOptions = uniqueValues(parts.map((item) => item.brand));
-  const categoryOptions = uniqueValues(parts.map((item) => item.category));
-  const modelOptions = uniqueValues(
-    parts
-      .flatMap((item) => item.compatibleModels?.split(",") ?? [])
-      .map((model) => model.trim())
-  );
-  return (
-    <Modal title="Thông tin linh kiện" onClose={onClose}>
-      <form
-        className="grid gap-3 md:grid-cols-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onSave(draft);
-        }}
-      >
-        <SuggestInput
-          label="Hãng linh kiện"
-          value={draft.brand ?? ""}
-          options={brandOptions}
-          listId="part-brand-options"
-          placeholder="Chọn hãng có sẵn hoặc nhập hãng mới"
-          onChange={(brand) => setDraft({ ...draft, brand })}
-        />
-        <Input label="Tên" value={draft.name} onChange={(name) => setDraft({ ...draft, name })} required />
-        <SuggestInput
-          label="Danh mục"
-          value={draft.category}
-          options={categoryOptions}
-          listId="part-category-options"
-          placeholder="Chọn danh mục có sẵn hoặc nhập danh mục mới"
-          onChange={(category) => setDraft({ ...draft, category })}
-          required
-        />
-        <SuggestInput
-          label="Model tương thích"
-          value={draft.compatibleModels ?? ""}
-          options={modelOptions}
-          listId="part-model-options"
-          placeholder="Chọn model có sẵn hoặc nhập model mới"
-          onChange={(compatibleModels) => setDraft({ ...draft, compatibleModels })}
-        />
-        <Input label="Nhà cung cấp" value={draft.supplier ?? ""} onChange={(supplier) => setDraft({ ...draft, supplier })} />
-        <MoneyInput label="Giá nhập mới nhất" value={draft.purchaseCost} onChange={(purchaseCost) => setDraft({ ...draft, purchaseCost })} />
-        <NumericInput label="Tồn hiện tại" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} />
-        <NumericInput label="Tồn tối thiểu" value={draft.minimumStock} onChange={(minimumStock) => setDraft({ ...draft, minimumStock })} />
-        <label className="md:col-span-2">
-          <span className="label">Ghi chú</span>
-          <textarea className="field min-h-20 py-3" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
-        </label>
-        <div className="flex justify-end gap-2 md:col-span-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Hủy
-          </button>
-          <button className="btn-primary">Lưu</button>
+      <div className="card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Log hệ thống</h2>
+            <p className="text-sm text-slate-500">{filteredLogs.length}/{appLogs.length} hoạt động</p>
+          </div>
         </div>
-      </form>
-    </Modal>
-  );
-}
-
-function PartImportDialog({
-  part,
-  partImport,
-  onClose,
-  onSave
-}: {
-  part: Part;
-  partImport: PartImport;
-  onClose: () => void;
-  onSave: (part: Part, partImport: PartImport) => void;
-}) {
-  const [draft, setDraft] = useState(partImport);
-  const total = Number(draft.quantity || 0) * Number(draft.unitCost || 0);
-  return (
-    <Modal title={`Nhập kho: ${part.name}`} onClose={onClose}>
-      <form
-        className="grid gap-3 md:grid-cols-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onSave(part, draft);
-        }}
-      >
-        <div className="rounded-lg border bg-muted/30 p-3 md:col-span-2">
-          <p className="font-semibold">
-            {part.brand ? `${part.brand} - ` : ""}
-            {part.name}
-          </p>
-          <p className="text-sm text-slate-500">Tồn hiện tại: {part.quantity}</p>
-        </div>
-        <NumericInput label="Số lượng nhập" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} required />
-        <MoneyInput label="Đơn giá nhập" value={draft.unitCost} onChange={(unitCost) => setDraft({ ...draft, unitCost })} required />
-        <Labeled label="Ngày giờ nhập">
+        <div className="mt-3 grid gap-3 lg:grid-cols-[1.4fr_1fr_1fr]">
           <input
             className="field"
-            type="datetime-local"
-            value={draft.importDateTime}
-            onChange={(event) => setDraft({ ...draft, importDateTime: event.target.value })}
-            required
+            value={logSearch}
+            onChange={(event) => setLogSearch(event.target.value)}
+            placeholder="Tìm nội dung log, mã dữ liệu, ngày giờ"
           />
-        </Labeled>
-        <Input label="Nhà cung cấp" value={draft.supplier ?? ""} onChange={(supplier) => setDraft({ ...draft, supplier })} />
-        <div className="rounded-lg bg-muted p-3 md:col-span-2">
-          <p className="label">Tổng tiền nhập</p>
-          <p className="mt-1 text-lg font-semibold">{currency(total)}</p>
-        </div>
-        <label className="md:col-span-2">
-          <span className="label">Ghi chú</span>
-          <textarea className="field min-h-20 py-3" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
-        </label>
-        <div className="flex justify-end gap-2 md:col-span-2">
-          <button type="button" className="btn-secondary" onClick={onClose}>
-            Hủy
-          </button>
-          <button className="btn-primary">Lưu nhập kho</button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-end bg-black/40 p-0 md:items-center md:justify-center md:p-6">
-      <div className="max-h-[92vh] w-full overflow-auto rounded-t-lg bg-card p-4 shadow-xl md:max-w-6xl md:rounded-lg">
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{title}</h2>
-          <button className="btn-secondary h-9" onClick={onClose}>
-            Đóng
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function Labeled({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label>
-      <span className="label">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function Input({
-  label,
-  value,
-  onChange,
-  type = "text",
-  required
-}: {
-  label: string;
-  value: string | number;
-  onChange: (value: string) => void;
-  type?: string;
-  required?: boolean;
-}) {
-  return (
-    <Labeled label={label}>
-      <input className="field" type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
-    </Labeled>
-  );
-}
-
-function formatMoneyInput(value: number) {
-  if (!value) return "";
-  return new Intl.NumberFormat("vi-VN", {
-    maximumFractionDigits: 0
-  }).format(value);
-}
-
-function MoneyInput({
-  label,
-  value,
-  onChange,
-  placeholder,
-  required
-}: {
-  label?: string;
-  value: number;
-  onChange: (value: number) => void;
-  placeholder?: string;
-  required?: boolean;
-}) {
-  const input = (
-    <input
-      className="field"
-      type="text"
-      inputMode="numeric"
-      autoComplete="off"
-      value={formatMoneyInput(value)}
-      placeholder={placeholder}
-      required={required}
-      onChange={(event) => {
-        const numericText = event.target.value.replace(/\D/g, "");
-        onChange(numericText ? Number(numericText) : 0);
-      }}
-    />
-  );
-
-  if (!label) return input;
-  return <Labeled label={label}>{input}</Labeled>;
-}
-
-function NumericInput({
-  label,
-  value,
-  onChange,
-  placeholder,
-  required
-}: {
-  label?: string;
-  value: number;
-  onChange: (value: number) => void;
-  placeholder?: string;
-  required?: boolean;
-}) {
-  const input = (
-    <input
-      className="field"
-      type="text"
-      inputMode="numeric"
-      autoComplete="off"
-      value={value === 0 ? "" : String(value)}
-      placeholder={placeholder}
-      required={required}
-      onChange={(event) => {
-        const numericText = event.target.value.replace(/\D/g, "");
-        onChange(numericText ? Number(numericText) : 0);
-      }}
-    />
-  );
-
-  if (!label) return input;
-  return <Labeled label={label}>{input}</Labeled>;
-}
-
-function SuggestInput({
-  label,
-  value,
-  options,
-  listId: _listId,
-  placeholder,
-  onChange,
-  required
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  listId: string;
-  placeholder?: string;
-  onChange: (value: string) => void;
-  required?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const normalizedValue = value.trim().toLowerCase();
-  const visibleOptions = options
-    .filter((option) => !normalizedValue || option.toLowerCase().includes(normalizedValue))
-    .slice(0, 12);
-
-  return (
-    <Labeled label={label}>
-      <div className="relative">
-        <input
-          className="field pr-10"
-          value={value}
-          placeholder={placeholder}
-          autoComplete="off"
-          onFocus={() => setOpen(true)}
-          onBlur={() => window.setTimeout(() => setOpen(false), 120)}
-          onChange={(event) => {
-            onChange(event.target.value);
-            setOpen(true);
-          }}
-          required={required}
-        />
-        <button
-          type="button"
-          className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center rounded-md hover:bg-muted"
-          aria-label="Mở danh sách gợi ý"
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => setOpen((current) => !current)}
-        >
-          <Search size={16} />
-        </button>
-        {open && visibleOptions.length > 0 && (
-          <div className="absolute z-[70] mt-1 max-h-64 w-full overflow-auto rounded-md border bg-card p-1 shadow-lg">
-            {visibleOptions.map((option) => (
-              <button
-                type="button"
-                className="block min-h-10 w-full rounded-md px-3 py-2 text-left text-sm hover:bg-muted"
-                key={option}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => {
-                  onChange(option);
-                  setOpen(false);
-                }}
-              >
-                {option}
-              </button>
+          <select className="field" value={logAction} onChange={(event) => setLogAction(event.target.value)}>
+            <option value="all">Tất cả thao tác</option>
+            {logActions.map((action) => (
+              <option key={action} value={action}>
+                {logActionLabels[action] ?? action}
+              </option>
             ))}
-          </div>
-        )}
-      </div>
-    </Labeled>
-  );
-}
-
-function DataTable({ headers, rows }: { headers: string[]; rows: (string | number)[][] }) {
-  return (
-    <div className="overflow-auto">
-      <table className="w-full min-w-[520px] text-sm">
-        <thead className="bg-muted text-left">
-          <tr>
-            {headers.map((header) => (
-              <th className="px-4 py-3 font-semibold" key={header}>
-                {header}
-              </th>
+          </select>
+          <select className="field" value={logEntityType} onChange={(event) => setLogEntityType(event.target.value)}>
+            <option value="all">Tất cả khu vực</option>
+            {logEntityTypes.map((entityType) => (
+              <option key={entityType} value={entityType}>
+                {entityTypeLabels[entityType] ?? entityType}
+              </option>
             ))}
-          </tr>
-        </thead>
-        <tbody>
-          {rows.length === 0 ? (
-            <tr>
-              <td className="px-4 py-6 text-center text-slate-500" colSpan={headers.length}>
-                Chưa có dữ liệu
-              </td>
-            </tr>
-          ) : (
-            rows.map((row, index) => (
-              <tr className="border-t" key={index}>
-                {row.map((cell, cellIndex) => (
-                  <td className="px-4 py-3" key={`${index}-${cellIndex}`}>
-                    {cell}
-                  </td>
-                ))}
-              </tr>
-            ))
-          )}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function PaginationControls({
-  page,
-  totalPages,
-  pageSize,
-  totalItems,
-  onPageChange,
-  onPageSizeChange
-}: {
-  page: number;
-  totalPages: number;
-  pageSize: number;
-  totalItems: number;
-  onPageChange: (page: number) => void;
-  onPageSizeChange: (pageSize: number) => void;
-}) {
-  const start = totalItems === 0 ? 0 : (page - 1) * pageSize + 1;
-  const end = Math.min(totalItems, page * pageSize);
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-t p-3 text-sm">
-      <div className="text-slate-500">
-        Hiển thị {start}-{end} / {totalItems}
-      </div>
-      <div className="flex items-center gap-2">
-        <select className="field h-9 w-28" value={pageSize} onChange={(event) => onPageSizeChange(Number(event.target.value))}>
-          {[10, 20, 50, 100].map((size) => (
-            <option key={size} value={size}>
-              {size}/trang
-            </option>
+          </select>
+        </div>
+        <div className="mt-3 max-h-[520px] space-y-2 overflow-auto pr-1">
+          {filteredLogs.map((log) => (
+            <div className="rounded-md border bg-background p-3" key={log.id}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="font-medium">{log.message}</p>
+                <span className="rounded-md bg-muted px-2 py-1 text-xs font-semibold">{logActionLabels[log.action] ?? log.action}</span>
+              </div>
+              <p className="mt-1 text-xs text-slate-500">
+                {formatDateTimeText(log.createdAt)} - {entityTypeLabels[log.entityType] ?? log.entityType}
+                {log.entityId ? `/${log.entityId}` : ""}
+              </p>
+            </div>
           ))}
-        </select>
-        <button className="btn-secondary h-9" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
-          Trước
-        </button>
-        <span className="min-w-20 text-center">
-          {page}/{totalPages}
-        </span>
-        <button className="btn-secondary h-9" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>
-          Sau
-        </button>
+          {filteredLogs.length === 0 && <div className="py-4 text-sm text-slate-500">Không có log phù hợp.</div>}
+        </div>
       </div>
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: PhoneStatus }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex rounded-full px-2.5 py-1 text-xs font-semibold",
-        status === "Sold" && "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-100",
-        status === "Ready For Sale" && "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200",
-        status.includes("Repair") && "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200",
-        status === "Purchased" && "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200",
-        status === "Reserved" && "bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-200"
-      )}
-    >
-      {statusLabels[status]}
-    </span>
-  );
-}
-
-function Stat({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
-  return (
-    <div className={cn("rounded-md bg-muted p-3", warn && "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-200")}>
-      <p className="label">{label}</p>
-      <p className="mt-1 font-semibold">{value}</p>
     </div>
   );
 }

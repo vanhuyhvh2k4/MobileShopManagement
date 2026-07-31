@@ -5,6 +5,7 @@ export const phoneSchema = z.object({
   brand: z.string().min(1, "Vui lòng nhập hãng"),
   model: z.string().min(1, "Vui lòng nhập model"),
   purchasePrice: z.coerce.number().nonnegative(),
+  purchaseDeposit: z.coerce.number().nonnegative().optional(),
   purchaseDate: z.string().min(1),
   status: z.string().min(1)
 });

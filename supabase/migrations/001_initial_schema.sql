@@ -12,23 +12,26 @@ create table if not exists public.phones (
   seller_name text,
   seller_phone text,
   purchase_price numeric not null default 0,
+  purchase_deposit numeric not null default 0,
   shipping_fee numeric not null default 0,
   purchase_date date not null,
   status text not null check (
-    status in ('Purchased', 'Waiting Repair', 'Repairing', 'Ready For Sale', 'Reserved', 'Sold')
+    status in ('Purchased', 'Waiting Inspection', 'Waiting Repair', 'Repairing', 'Ready For Sale', 'Reserved', 'Sold')
   ),
   notes text,
   image_front text,
   image_back text,
   image_imei text,
   image_accessories text,
+  deleted_at timestamptz,
   updated_at timestamptz not null default now()
 );
 
 create table if not exists public.phone_faults (
   id text primary key,
   phone_id text not null references public.phones(id) on delete cascade,
-  fault_name text not null
+  fault_name text not null,
+  deleted_at timestamptz
 );
 
 create table if not exists public.repairs (
@@ -38,7 +41,8 @@ create table if not exists public.repairs (
   description text not null default '',
   technician text,
   labor_cost numeric not null default 0,
-  notes text
+  notes text,
+  deleted_at timestamptz
 );
 
 create table if not exists public.parts (
@@ -51,7 +55,8 @@ create table if not exists public.parts (
   quantity integer not null default 0,
   minimum_stock integer not null default 0,
   supplier text,
-  notes text
+  notes text,
+  deleted_at timestamptz
 );
 
 create table if not exists public.part_imports (
@@ -61,7 +66,8 @@ create table if not exists public.part_imports (
   unit_cost numeric not null default 0,
   import_datetime timestamptz not null default now(),
   supplier text,
-  notes text
+  notes text,
+  deleted_at timestamptz
 );
 
 create table if not exists public.repair_parts (
@@ -69,7 +75,8 @@ create table if not exists public.repair_parts (
   repair_id text not null references public.repairs(id) on delete cascade,
   part_id text not null references public.parts(id),
   quantity integer not null default 1,
-  unit_cost numeric not null default 0
+  unit_cost numeric not null default 0,
+  deleted_at timestamptz
 );
 
 create table if not exists public.expenses (
@@ -78,7 +85,8 @@ create table if not exists public.expenses (
   amount numeric not null default 0,
   category text not null,
   description text not null default '',
-  date date not null default current_date
+  date date not null default current_date,
+  deleted_at timestamptz
 );
 
 create table if not exists public.customers (
@@ -86,7 +94,8 @@ create table if not exists public.customers (
   name text not null,
   phone text not null,
   address text,
-  notes text
+  notes text,
+  deleted_at timestamptz
 );
 
 create table if not exists public.sales (
@@ -100,7 +109,17 @@ create table if not exists public.sales (
   delivery_status text not null default 'pending_delivery' check (
     delivery_status in ('pending_delivery', 'delivered', 'not_received')
   ),
-  notes text
+  notes text,
+  deleted_at timestamptz
+);
+
+create table if not exists public.app_logs (
+  id text primary key,
+  action text not null,
+  entity_type text not null,
+  entity_id text,
+  message text not null,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.settings (
@@ -121,6 +140,7 @@ alter table public.expenses enable row level security;
 alter table public.customers enable row level security;
 alter table public.sales enable row level security;
 alter table public.settings enable row level security;
+alter table public.app_logs enable row level security;
 
 create policy "single admin access phones" on public.phones for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "single admin access faults" on public.phone_faults for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
@@ -132,3 +152,4 @@ create policy "single admin access expenses" on public.expenses for all using (a
 create policy "single admin access customers" on public.customers for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "single admin access sales" on public.sales for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
 create policy "single admin access settings" on public.settings for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');
+create policy "single admin access app logs" on public.app_logs for all using (auth.role() = 'authenticated') with check (auth.role() = 'authenticated');

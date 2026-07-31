@@ -1,5 +1,6 @@
 export type PhoneStatus =
   | "Purchased"
+  | "Waiting Inspection"
   | "Waiting Repair"
   | "Repairing"
   | "Ready For Sale"
@@ -20,6 +21,7 @@ export type Phone = {
   sellerName?: string;
   sellerPhone?: string;
   purchasePrice: number;
+  purchaseDeposit?: number;
   shippingFee?: number;
   purchaseDate: string;
   status: PhoneStatus;
@@ -117,6 +119,23 @@ export type Settings = {
   darkMode: boolean;
 };
 
+export type AppLog = {
+  id: string;
+  action: string;
+  entityType: string;
+  entityId?: string;
+  message: string;
+  createdAt: string;
+};
+
+export type DeletedRow = {
+  table: string;
+  id: string;
+  label: string;
+  deletedAt: string;
+  row: Record<string, unknown>;
+};
+
 export type BackupPayload = {
   phones: Phone[];
   faults: PhoneFault[];
@@ -128,4 +147,5 @@ export type BackupPayload = {
   customers: Customer[];
   sales: Sale[];
   settings: Settings[];
+  appLogs?: AppLog[];
 };
