@@ -23,13 +23,20 @@ Mở URL Vite hiển thị trong terminal. Ứng dụng sẽ tạo dữ liệu m
 
 1. Tạo một Supabase project.
 2. Chạy `supabase/migrations/001_initial_schema.sql`.
-3. Nếu chưa dùng Supabase Auth/login, chạy thêm `supabase/migrations/002_allow_anon_app_access.sql` để app có thể đọc/ghi bằng anon key.
+3. Tạo user đăng nhập trong Supabase Dashboard: Authentication → Users → Add user.
 4. Sao chép `.env.example` thành `.env`.
 5. Điền `VITE_SUPABASE_URL` và `VITE_SUPABASE_ANON_KEY`.
+6. Nếu trước đây đã chạy `supabase/migrations/002_allow_anon_app_access.sql`, chạy thêm `supabase/migrations/004_require_supabase_auth.sql` để gỡ quyền anon và chỉ cho user đã đăng nhập đọc/ghi dữ liệu.
 
-Giao diện đọc/ghi trực tiếp với Supabase khi `.env` đã cấu hình. Ứng dụng không còn lưu dữ liệu vào IndexedDB. Lưu ý: nếu dùng anon policy thì app nên được triển khai riêng tư, vì anon key là public trong trình duyệt.
+Giao diện đọc/ghi trực tiếp với Supabase khi `.env` đã cấu hình và người dùng đã đăng nhập bằng Supabase Auth. Ứng dụng không còn lưu dữ liệu vào IndexedDB.
 
 Đơn vị tiền tệ mặc định là `VND`. Nếu dự án Supabase đã có dữ liệu cài đặt cũ, chạy thêm `supabase/migrations/003_set_currency_vnd.sql`.
+
+## Đăng nhập
+
+Ứng dụng yêu cầu đăng nhập trước khi đọc dữ liệu Supabase. Tài khoản đăng nhập là email/mật khẩu được tạo trong Supabase Authentication, không lưu mật khẩu trong source hay `.env` frontend.
+
+Sau khi đăng nhập, thiết bị đó được giữ phiên tối đa 2 ngày. Bấm nút đăng xuất trên thanh công cụ để xoá phiên sớm hơn.
 
 ## Luồng nghiệp vụ chính
 
@@ -44,6 +51,7 @@ Giao diện đọc/ghi trực tiếp với Supabase khi `.env` đã cấu hình.
 ## Tính năng đã có
 
 - Tổng quan chỉ số và biểu đồ theo tháng
+- Màn hình đăng nhập và giữ phiên 2 ngày theo từng thiết bị
 - Nhập điện thoại cũ với hãng, model, tên người mua, giá mua, phí vận chuyển, tình trạng, ghi chú và ảnh sản phẩm
 - CRUD tồn kho linh kiện với cảnh báo sắp hết
 - Chọn linh kiện thay thế cho từng điện thoại và tự trừ tồn kho

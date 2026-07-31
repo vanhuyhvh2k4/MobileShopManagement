@@ -3,6 +3,8 @@ import {
   ChartNoAxesCombined,
   CircleDollarSign,
   Download,
+  LockKeyhole,
+  LogOut,
   Moon,
   PackagePlus,
   PanelLeft,
@@ -91,6 +93,9 @@ const defaultSettings: Settings = {
   darkMode: false
 };
 
+const authSessionDeadlineKey = "phone-manager-auth-deadline";
+const loginDurationMs = 2 * 24 * 60 * 60 * 1000;
+
 const blankPhone = (): Phone => ({
   id: uid("phone"),
   imei1: "",
@@ -143,7 +148,26 @@ function paginate<T>(items: T[], page: number, pageSize: number) {
   };
 }
 
+function hasValidAuthDeadline() {
+  try {
+    const raw = window.localStorage.getItem(authSessionDeadlineKey);
+    if (!raw) return false;
+    const expiresAt = Number(raw);
+    if (!expiresAt || expiresAt <= Date.now()) {
+      window.localStorage.removeItem(authSessionDeadlineKey);
+      return false;
+    }
+    return true;
+  } catch {
+    window.localStorage.removeItem(authSessionDeadlineKey);
+    return false;
+  }
+}
+
 export function App() {
+  const [authReady, setAuthReady] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [loginError, setLoginError] = useState("");
   const [view, setView] = useState<View>("dashboard");
   const [query, setQuery] = useState("");
   const [phoneDraft, setPhoneDraft] = useState<Phone | null>(null);
@@ -168,7 +192,62 @@ export function App() {
     console.error(error);
   }
 
+  function clearPrivateState() {
+    setPhones([]);
+    setFaults([]);
+    setRepairs([]);
+    setParts([]);
+    setRepairParts([]);
+    setExpenses([]);
+    setCustomers([]);
+    setSales([]);
+    setSettings(defaultSettings);
+    setQuery("");
+    setPhoneDraft(null);
+    setPartDraft(null);
+    setRepairPhone(null);
+  }
+
   useEffect(() => {
+    let active = true;
+    if (!supabase) {
+      setAuthReady(true);
+      return;
+    }
+
+    void (async () => {
+      const { data } = await supabase.auth.getSession();
+      const authenticated = Boolean(data.session) && hasValidAuthDeadline();
+      if (!authenticated && data.session) {
+        await supabase.auth.signOut();
+      }
+      if (!active) return;
+      setIsAuthenticated(authenticated);
+      setAuthReady(true);
+    })();
+
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!session) {
+        window.localStorage.removeItem(authSessionDeadlineKey);
+        clearPrivateState();
+        setIsAuthenticated(false);
+        setAuthReady(true);
+        return;
+      }
+      if (hasValidAuthDeadline()) {
+        setIsAuthenticated(true);
+        setAuthReady(true);
+      }
+    });
+
+    return () => {
+      active = false;
+      data.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
     void (async () => {
       try {
         if (!supabase) {
@@ -190,7 +269,20 @@ export function App() {
         reportSyncError(error);
       }
     })();
-  }, []);
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const expiresAt = Number(window.localStorage.getItem(authSessionDeadlineKey));
+    if (!expiresAt) return;
+    const timeout = window.setTimeout(() => {
+      window.localStorage.removeItem(authSessionDeadlineKey);
+      void supabase?.auth.signOut();
+      setIsAuthenticated(false);
+      clearPrivateState();
+    }, Math.max(0, expiresAt - Date.now()));
+    return () => window.clearTimeout(timeout);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", settings.darkMode);
@@ -473,6 +565,40 @@ export function App() {
     }
   }
 
+  async function handleLogin(input: { email: string; password: string }) {
+    if (!supabase) {
+      setLoginError("Chưa cấu hình Supabase. Cần VITE_SUPABASE_URL và VITE_SUPABASE_ANON_KEY.");
+      return;
+    }
+    const { error } = await supabase.auth.signInWithPassword({
+      email: input.email.trim(),
+      password: input.password
+    });
+    if (error) {
+      setLoginError("Email hoặc mật khẩu không đúng.");
+      return;
+    }
+    window.localStorage.setItem(authSessionDeadlineKey, String(Date.now() + loginDurationMs));
+    setLoginError("");
+    setIsAuthenticated(true);
+    setAuthReady(true);
+  }
+
+  async function handleLogout() {
+    window.localStorage.removeItem(authSessionDeadlineKey);
+    await supabase?.auth.signOut();
+    setIsAuthenticated(false);
+    clearPrivateState();
+  }
+
+  if (!authReady) {
+    return <LoadingScreen />;
+  }
+
+  if (!isAuthenticated) {
+    return <LoginScreen businessName={settings.businessName} error={loginError} onLogin={handleLogin} />;
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <aside className="fixed inset-y-0 left-0 hidden w-64 border-r bg-card px-4 py-5 lg:block">
@@ -528,6 +654,9 @@ export function App() {
               onClick={() => void updateSettings({ ...settings, darkMode: !settings.darkMode })}
             >
               {settings.darkMode ? <Sun size={18} /> : <Moon size={18} />}
+            </button>
+            <button className="btn-secondary" aria-label="Đăng xuất" onClick={() => void handleLogout()}>
+              <LogOut size={18} />
             </button>
           </div>
           <div className="mt-2 text-xs text-slate-500">{syncMessage}</div>
@@ -620,6 +749,87 @@ export function App() {
           onSave={saveRepair}
         />
       )}
+    </div>
+  );
+}
+
+function LoginScreen({
+  businessName,
+  error,
+  onLogin
+}: {
+  businessName: string;
+  error: string;
+  onLogin: (input: { email: string; password: string }) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <form
+        className="card w-full max-w-sm space-y-4 p-5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void (async () => {
+            setSubmitting(true);
+            await onLogin({ email, password });
+            setSubmitting(false);
+          })();
+        }}
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary text-white">
+            <LockKeyhole size={22} />
+          </div>
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-bold">{businessName}</h1>
+            <p className="text-sm text-slate-500">Đăng nhập để quản lý cửa hàng</p>
+          </div>
+        </div>
+        <Labeled label="Email">
+          <input
+            className="field"
+            type="email"
+            value={email}
+            autoComplete="username"
+            placeholder="email-da-tao-trong-supabase@example.com"
+            onChange={(event) => setEmail(event.target.value)}
+            required
+          />
+        </Labeled>
+        <Labeled label="Mật khẩu">
+          <input
+            className="field"
+            type="password"
+            value={password}
+            autoComplete="current-password"
+            onChange={(event) => setPassword(event.target.value)}
+            required
+          />
+        </Labeled>
+        {error && <div className="rounded-md bg-red-100 p-3 text-sm text-red-700 dark:bg-red-900/30 dark:text-red-200">{error}</div>}
+        <button className="btn-primary w-full" disabled={submitting}>
+          {submitting ? "Đang đăng nhập..." : "Đăng nhập"}
+        </button>
+        <p className="text-center text-xs text-slate-500">Phiên Supabase Auth trên thiết bị này được giới hạn 2 ngày.</p>
+      </form>
+    </div>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background p-4">
+      <div className="card flex w-full max-w-sm items-center gap-3 p-5">
+        <div className="flex h-10 w-10 items-center justify-center rounded-md bg-muted text-primary">
+          <LockKeyhole size={20} />
+        </div>
+        <div>
+          <p className="font-semibold">Đang kiểm tra đăng nhập</p>
+          <p className="text-sm text-slate-500">Vui lòng chờ trong giây lát.</p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -732,7 +942,7 @@ function Dashboard({
               <BarChart data={chartData}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="month" />
-                <YAxis />
+                <YAxis allowDecimals={false} />
                 <Tooltip />
                 <Bar dataKey="sales" name="Bán ra" fill="#14b8a6" />
                 <Bar dataKey="purchases" name="Mua vào" fill="#64748b" />
