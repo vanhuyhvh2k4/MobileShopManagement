@@ -60,6 +60,16 @@ export type Part = {
   notes?: string;
 };
 
+export type PartImport = {
+  id: string;
+  partId: string;
+  quantity: number;
+  unitCost: number;
+  importDateTime: string;
+  supplier?: string;
+  notes?: string;
+};
+
 export type RepairPart = {
   id: string;
   repairId: string;
@@ -81,16 +91,21 @@ export type Customer = {
   id: string;
   name: string;
   phone: string;
+  address?: string;
   notes?: string;
 };
+
+export type SaleDeliveryStatus = "pending_delivery" | "delivered" | "not_received";
 
 export type Sale = {
   id: string;
   phoneId: string;
   customerId: string;
   salePrice: number;
+  depositAmount: number;
   saleDate: string;
-  warrantyMonths: number;
+  saleDateTime?: string;
+  deliveryStatus: SaleDeliveryStatus;
   notes?: string;
 };
 
@@ -107,6 +122,7 @@ export type BackupPayload = {
   faults: PhoneFault[];
   repairs: Repair[];
   parts: Part[];
+  partImports: PartImport[];
   repairParts: RepairPart[];
   expenses: Expense[];
   customers: Customer[];

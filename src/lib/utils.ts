@@ -17,6 +17,12 @@ export function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
+export function nowLocalDateTime() {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
 export function monthKey(date: string) {
   return date.slice(0, 7);
 }

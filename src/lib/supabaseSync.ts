@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import type { BackupPayload, Customer, Expense, Part, Phone, PhoneFault, Repair, RepairPart, Sale, Settings } from "./types";
+import type { BackupPayload, Customer, Expense, Part, PartImport, Phone, PhoneFault, Repair, RepairPart, Sale, Settings } from "./types";
 
 const selectAll = async <T>(table: string) => {
   if (!supabase) return [] as T[];
@@ -140,6 +140,26 @@ const rowToPart = (row: Record<string, unknown>): Part => ({
   notes: row.notes ? String(row.notes) : undefined
 });
 
+export const partImportToRow = (partImport: PartImport) => ({
+  id: partImport.id,
+  part_id: partImport.partId,
+  quantity: partImport.quantity,
+  unit_cost: partImport.unitCost,
+  import_datetime: partImport.importDateTime,
+  supplier: partImport.supplier ?? null,
+  notes: partImport.notes ?? null
+});
+
+const rowToPartImport = (row: Record<string, unknown>): PartImport => ({
+  id: String(row.id),
+  partId: String(row.part_id),
+  quantity: Number(row.quantity ?? 0),
+  unitCost: Number(row.unit_cost ?? 0),
+  importDateTime: String(row.import_datetime ?? ""),
+  supplier: row.supplier ? String(row.supplier) : undefined,
+  notes: row.notes ? String(row.notes) : undefined
+});
+
 export const repairPartToRow = (repairPart: RepairPart) => ({
   id: repairPart.id,
   repair_id: repairPart.repairId,
@@ -178,6 +198,7 @@ export const customerToRow = (customer: Customer) => ({
   id: customer.id,
   name: customer.name,
   phone: customer.phone,
+  address: customer.address ?? null,
   notes: customer.notes ?? null
 });
 
@@ -185,6 +206,7 @@ const rowToCustomer = (row: Record<string, unknown>): Customer => ({
   id: String(row.id),
   name: String(row.name ?? ""),
   phone: String(row.phone ?? ""),
+  address: row.address ? String(row.address) : undefined,
   notes: row.notes ? String(row.notes) : undefined
 });
 
@@ -193,8 +215,10 @@ export const saleToRow = (sale: Sale) => ({
   phone_id: sale.phoneId,
   customer_id: sale.customerId,
   sale_price: sale.salePrice,
+  deposit_amount: sale.depositAmount ?? 0,
   sale_date: sale.saleDate,
-  warranty_months: sale.warrantyMonths,
+  sale_datetime: sale.saleDateTime ?? null,
+  delivery_status: sale.deliveryStatus,
   notes: sale.notes ?? null
 });
 
@@ -203,8 +227,10 @@ const rowToSale = (row: Record<string, unknown>): Sale => ({
   phoneId: String(row.phone_id),
   customerId: String(row.customer_id),
   salePrice: Number(row.sale_price ?? 0),
+  depositAmount: Number(row.deposit_amount ?? 0),
   saleDate: String(row.sale_date ?? ""),
-  warrantyMonths: Number(row.warranty_months ?? 0),
+  saleDateTime: row.sale_datetime ? String(row.sale_datetime) : undefined,
+  deliveryStatus: String(row.delivery_status ?? "delivered") as Sale["deliveryStatus"],
   notes: row.notes ? String(row.notes) : undefined
 });
 
@@ -230,6 +256,7 @@ export async function fetchSupabaseData(): Promise<BackupPayload> {
     faults: (await selectAll<Record<string, unknown>>("phone_faults")).map(rowToFault),
     repairs: (await selectAll<Record<string, unknown>>("repairs")).map(rowToRepair),
     parts: (await selectAll<Record<string, unknown>>("parts")).map(rowToPart),
+    partImports: (await selectAll<Record<string, unknown>>("part_imports")).map(rowToPartImport),
     repairParts: (await selectAll<Record<string, unknown>>("repair_parts")).map(rowToRepairPart),
     expenses: (await selectAll<Record<string, unknown>>("expenses")).map(rowToExpense),
     customers: (await selectAll<Record<string, unknown>>("customers")).map(rowToCustomer),
@@ -242,6 +269,7 @@ export async function pushBackupToSupabase(payload: BackupPayload) {
   await upsertRows("phones", payload.phones.map(phoneToRow));
   await upsertRows("phone_faults", payload.faults.map(faultToRow));
   await upsertRows("parts", payload.parts.map(partToRow));
+  await upsertRows("part_imports", (payload.partImports ?? []).map(partImportToRow));
   await upsertRows("repairs", payload.repairs.map(repairToRow));
   await upsertRows("repair_parts", payload.repairParts.map(repairPartToRow));
   await upsertRows("expenses", payload.expenses.map(expenseToRow));
@@ -254,6 +282,7 @@ export const remoteUpsert = {
   phone: (phone: Phone) => upsertRow("phones", phoneToRow(phone)),
   fault: (fault: PhoneFault) => upsertRow("phone_faults", faultToRow(fault)),
   part: (part: Part) => upsertRow("parts", partToRow(part)),
+  partImport: (partImport: PartImport) => upsertRow("part_imports", partImportToRow(partImport)),
   repair: (repair: Repair) => upsertRow("repairs", repairToRow(repair)),
   repairPart: (repairPart: RepairPart) => upsertRow("repair_parts", repairPartToRow(repairPart)),
   customer: (customer: Customer) => upsertRow("customers", customerToRow(customer)),

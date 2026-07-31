@@ -45,15 +45,17 @@ import type {
   Customer,
   Expense,
   Part,
+  PartImport,
   Phone,
   PhoneFault,
   PhoneStatus,
   Repair,
   RepairPart,
   Sale,
+  SaleDeliveryStatus,
   Settings
 } from "../lib/types";
-import { cn, currency, todayISO, uid } from "../lib/utils";
+import { cn, currency, nowLocalDateTime, todayISO, uid } from "../lib/utils";
 
 const statuses: PhoneStatus[] = [
   "Purchased",
@@ -73,12 +75,21 @@ const statusLabels: Record<PhoneStatus, string> = {
   Sold: "Đã bán"
 };
 
-type View = "dashboard" | "phones" | "parts" | "sales" | "reports" | "customers" | "settings";
+const deliveryStatuses: SaleDeliveryStatus[] = ["pending_delivery", "delivered", "not_received"];
+
+const deliveryStatusLabels: Record<SaleDeliveryStatus, string> = {
+  pending_delivery: "Chờ vận chuyển",
+  delivered: "Đã giao",
+  not_received: "Không nhận hàng"
+};
+
+type View = "dashboard" | "phones" | "parts" | "partImports" | "sales" | "reports" | "customers" | "settings";
 
 const navItems: { id: View; label: string; icon: typeof Smartphone }[] = [
   { id: "dashboard", label: "Tổng quan", icon: ChartNoAxesCombined },
   { id: "phones", label: "Điện thoại", icon: Smartphone },
   { id: "parts", label: "Linh kiện", icon: Boxes },
+  { id: "partImports", label: "Lịch sử nhập", icon: PackagePlus },
   { id: "sales", label: "Bán hàng", icon: CircleDollarSign },
   { id: "customers", label: "Khách hàng", icon: Users },
   { id: "reports", label: "Báo cáo", icon: Download },
@@ -118,6 +129,16 @@ const blankPart = (): Part => ({
   minimumStock: 1
 });
 
+const blankPartImport = (part: Part): PartImport => ({
+  id: uid("partimport"),
+  partId: part.id,
+  quantity: 1,
+  unitCost: part.purchaseCost,
+  importDateTime: nowLocalDateTime(),
+  supplier: part.supplier,
+  notes: ""
+});
+
 function fileToDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -136,6 +157,28 @@ function uniqueValues(values: Array<string | undefined>) {
 function isPartRecommendedForPhone(part: Part, phone: Phone) {
   const haystack = [part.brand, part.compatibleModels, part.name, part.category].filter(Boolean).join(" ").toLowerCase();
   return [phone.brand, phone.model].filter(Boolean).some((value) => haystack.includes(value.toLowerCase()));
+}
+
+function normalizeCustomerIdentity(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function formatSaleDateTime(sale: Sale) {
+  if (!sale.saleDateTime) return sale.saleDate;
+  return formatDateTimeText(sale.saleDateTime, sale.saleDate);
+}
+
+function formatDateTimeText(value: string, fallback = value) {
+  if (!value) return fallback;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value.replace("T", " ");
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(date);
 }
 
 function paginate<T>(items: T[], page: number, pageSize: number) {
@@ -172,6 +215,7 @@ export function App() {
   const [query, setQuery] = useState("");
   const [phoneDraft, setPhoneDraft] = useState<Phone | null>(null);
   const [partDraft, setPartDraft] = useState<Part | null>(null);
+  const [partImportDraft, setPartImportDraft] = useState<{ part: Part; partImport: PartImport } | null>(null);
   const [repairPhone, setRepairPhone] = useState<Phone | null>(null);
   const [syncMessage, setSyncMessage] = useState(supabase ? "Đang kết nối Supabase..." : "Chưa cấu hình Supabase");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -180,6 +224,7 @@ export function App() {
   const [faults, setFaults] = useState<PhoneFault[]>([]);
   const [repairs, setRepairs] = useState<Repair[]>([]);
   const [parts, setParts] = useState<Part[]>([]);
+  const [partImports, setPartImports] = useState<PartImport[]>([]);
   const [repairParts, setRepairParts] = useState<RepairPart[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -197,6 +242,7 @@ export function App() {
     setFaults([]);
     setRepairs([]);
     setParts([]);
+    setPartImports([]);
     setRepairParts([]);
     setExpenses([]);
     setCustomers([]);
@@ -205,6 +251,7 @@ export function App() {
     setQuery("");
     setPhoneDraft(null);
     setPartDraft(null);
+    setPartImportDraft(null);
     setRepairPhone(null);
   }
 
@@ -259,6 +306,7 @@ export function App() {
         setFaults(payload.faults);
         setRepairs(payload.repairs);
         setParts(payload.parts);
+        setPartImports(payload.partImports ?? []);
         setRepairParts(payload.repairParts);
         setExpenses(payload.expenses);
         setCustomers(payload.customers);
@@ -351,6 +399,55 @@ export function App() {
     }
   }
 
+  async function savePartImport(part: Part, partImport: PartImport) {
+    const savedImport = {
+      ...partImport,
+      importDateTime: partImport.importDateTime ? new Date(partImport.importDateTime).toISOString() : new Date().toISOString()
+    };
+    const importedQuantity = Number(savedImport.quantity || 0);
+    const importedCost = Number(savedImport.unitCost || 0);
+    const updatedPart = {
+      ...part,
+      quantity: part.quantity + importedQuantity,
+      purchaseCost: importedCost,
+      supplier: savedImport.supplier || part.supplier
+    };
+    try {
+      await remoteUpsert.partImport(savedImport);
+      await remoteUpsert.part(updatedPart);
+      setPartImports((current) => [savedImport, ...current.filter((item) => item.id !== savedImport.id)]);
+      setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      setSyncMessage("Đã nhập linh kiện vào kho");
+      setPartImportDraft(null);
+    } catch (error) {
+      reportSyncError(error);
+    }
+  }
+
+  async function deletePartImport(partImport: PartImport) {
+    const part = parts.find((item) => item.id === partImport.partId);
+    if (!part) return;
+    if (!window.confirm(`Xoá phiếu nhập ${part.name} số lượng ${partImport.quantity}? Tồn kho sẽ được trừ lại tương ứng.`)) return;
+    const remainingImports = partImports
+      .filter((item) => item.id !== partImport.id && item.partId === partImport.partId)
+      .sort((a, b) => b.importDateTime.localeCompare(a.importDateTime));
+    const updatedPart = {
+      ...part,
+      quantity: Math.max(0, part.quantity - Number(partImport.quantity || 0)),
+      purchaseCost: remainingImports[0]?.unitCost ?? part.purchaseCost,
+      supplier: remainingImports[0]?.supplier || part.supplier
+    };
+    try {
+      await deleteRemoteRow("part_imports", partImport.id);
+      await remoteUpsert.part(updatedPart);
+      setPartImports((current) => current.filter((item) => item.id !== partImport.id));
+      setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      setSyncMessage("Đã xoá phiếu nhập linh kiện");
+    } catch (error) {
+      reportSyncError(error);
+    }
+  }
+
   async function deletePhone(phone: Phone) {
     if (!window.confirm(`Xoá ${phone.brand} ${phone.model}? Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`)) return;
     const phoneRepairs = repairs.filter((repair) => repair.phoneId === phone.id);
@@ -379,6 +476,7 @@ export function App() {
     try {
       await deleteRemoteRow("parts", part.id);
       setParts((current) => current.filter((item) => item.id !== part.id));
+      setPartImports((current) => current.filter((item) => item.partId !== part.id));
       setSyncMessage("Đã xoá linh kiện trên Supabase");
     } catch (error) {
       reportSyncError(error);
@@ -426,36 +524,72 @@ export function App() {
     phoneId: string;
     customerName: string;
     customerPhone: string;
+    customerAddress: string;
     salePrice: number;
+    depositAmount: number;
     saleDate: string;
-    warrantyMonths: number;
+    saleDateTime: string;
+    deliveryStatus: SaleDeliveryStatus;
     notes: string;
   }) {
     if (!input.phoneId) return;
+    const existingCustomer = customers.find(
+      (customer) =>
+        normalizeCustomerIdentity(customer.name) === normalizeCustomerIdentity(input.customerName) &&
+        normalizeCustomerIdentity(customer.phone) === normalizeCustomerIdentity(input.customerPhone)
+    );
     const customer: Customer = {
-      id: uid("customer"),
+      id: existingCustomer?.id ?? uid("customer"),
       name: input.customerName,
-      phone: input.customerPhone
+      phone: input.customerPhone,
+      address: input.customerAddress || existingCustomer?.address
     };
     const sale: Sale = {
       id: uid("sale"),
       phoneId: input.phoneId,
       customerId: customer.id,
       salePrice: Number(input.salePrice),
-      saleDate: input.saleDate,
-      warrantyMonths: Number(input.warrantyMonths),
+      depositAmount: Number(input.depositAmount),
+      saleDate: input.saleDateTime.slice(0, 10) || input.saleDate,
+      saleDateTime: input.saleDateTime ? new Date(input.saleDateTime).toISOString() : undefined,
+      deliveryStatus: input.deliveryStatus,
       notes: input.notes
     };
     const phone = phones.find((item) => item.id === input.phoneId);
-    const soldPhone = phone ? { ...phone, status: "Sold" as const, updatedAt: new Date().toISOString() } : undefined;
+    const nextPhoneStatus = input.deliveryStatus === "not_received" ? "Ready For Sale" : "Sold";
+    const soldPhone = phone ? { ...phone, status: nextPhoneStatus as PhoneStatus, updatedAt: new Date().toISOString() } : undefined;
     try {
       await remoteUpsert.customer(customer);
       await remoteUpsert.sale(sale);
       if (soldPhone) await remoteUpsert.phone(soldPhone);
-      setCustomers((current) => [...current, customer]);
+      setCustomers((current) => {
+        const exists = current.some((item) => item.id === customer.id);
+        return exists ? current.map((item) => (item.id === customer.id ? customer : item)) : [...current, customer];
+      });
       setSales((current) => [...current, sale]);
       if (soldPhone) setPhones((current) => current.map((item) => (item.id === soldPhone.id ? soldPhone : item)));
       setSyncMessage("Đã ghi bán hàng lên Supabase");
+    } catch (error) {
+      reportSyncError(error);
+    }
+  }
+
+  async function updateSaleDeliveryStatus(sale: Sale, deliveryStatus: SaleDeliveryStatus) {
+    const updatedSale = { ...sale, deliveryStatus };
+    const phone = phones.find((item) => item.id === sale.phoneId);
+    const restoredPhone = phone
+      ? {
+          ...phone,
+          status: (deliveryStatus === "not_received" ? "Ready For Sale" : "Sold") as PhoneStatus,
+          updatedAt: new Date().toISOString()
+        }
+      : undefined;
+    try {
+      await remoteUpsert.sale(updatedSale);
+      if (restoredPhone) await remoteUpsert.phone(restoredPhone);
+      setSales((current) => current.map((item) => (item.id === sale.id ? updatedSale : item)));
+      if (restoredPhone) setPhones((current) => current.map((item) => (item.id === restoredPhone.id ? restoredPhone : item)));
+      setSyncMessage("Đã cập nhật trạng thái vận chuyển");
     } catch (error) {
       reportSyncError(error);
     }
@@ -517,6 +651,7 @@ export function App() {
       faults,
       repairs,
       parts,
+      partImports,
       repairParts,
       expenses,
       customers,
@@ -545,6 +680,7 @@ export function App() {
       setFaults(payload.faults ?? []);
       setRepairs(payload.repairs ?? []);
       setParts(payload.parts ?? []);
+      setPartImports(payload.partImports ?? []);
       setRepairParts(payload.repairParts ?? []);
       setExpenses(payload.expenses ?? []);
       setCustomers(payload.customers ?? []);
@@ -691,7 +827,16 @@ export function App() {
               onDelete={deletePhone}
             />
           )}
-          {view === "parts" && <PartsView parts={parts} onEdit={setPartDraft} onDelete={deletePart} />}
+          {view === "parts" && (
+            <PartsView
+              parts={parts}
+              partImports={partImports}
+              onEdit={setPartDraft}
+              onImport={(part) => setPartImportDraft({ part, partImport: blankPartImport(part) })}
+              onDelete={deletePart}
+            />
+          )}
+          {view === "partImports" && <PartImportsView parts={parts} partImports={partImports} onDelete={deletePartImport} />}
           {view === "sales" && (
             <SalesView
               phones={phones}
@@ -702,6 +847,7 @@ export function App() {
               repairParts={repairParts}
               expenses={expenses}
               onDelete={deleteSale}
+              onUpdateDeliveryStatus={updateSaleDeliveryStatus}
               onSave={saveSale}
             />
           )}
@@ -736,6 +882,14 @@ export function App() {
       )}
       {partDraft && (
         <PartDialog part={partDraft} parts={parts} onClose={() => setPartDraft(null)} onSave={savePart} />
+      )}
+      {partImportDraft && (
+        <PartImportDialog
+          part={partImportDraft.part}
+          partImport={partImportDraft.partImport}
+          onClose={() => setPartImportDraft(null)}
+          onSave={savePartImport}
+        />
       )}
       {repairPhone && (
         <RepairDialog
@@ -1262,7 +1416,19 @@ function PhonesView(props: {
   );
 }
 
-function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: Part) => void; onDelete: (part: Part) => void }) {
+function PartsView({
+  parts,
+  partImports,
+  onEdit,
+  onImport,
+  onDelete
+}: {
+  parts: Part[];
+  partImports: PartImport[];
+  onEdit: (part: Part) => void;
+  onImport: (part: Part) => void;
+  onDelete: (part: Part) => void;
+}) {
   const [searchTerm, setSearchTerm] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
@@ -1286,6 +1452,16 @@ function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: 
     return matchesSearch && matchesBrand && matchesCategory && matchesStock;
   });
   const paginatedParts = paginate(filteredParts, page, pageSize);
+  const inventoryValue = filteredParts.reduce((sum, part) => sum + part.quantity * part.purchaseCost, 0);
+  const importsByPart = new Map<string, PartImport[]>();
+  for (const partImport of partImports) {
+    const current = importsByPart.get(partImport.partId) ?? [];
+    current.push(partImport);
+    importsByPart.set(partImport.partId, current);
+  }
+  for (const imports of importsByPart.values()) {
+    imports.sort((a, b) => b.importDateTime.localeCompare(a.importDateTime));
+  }
 
   useEffect(() => {
     setPage(1);
@@ -1296,7 +1472,9 @@ function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Kho linh kiện</h2>
-          <p className="text-sm text-slate-500">{filteredParts.length}/{parts.length} linh kiện</p>
+          <p className="text-sm text-slate-500">
+            {filteredParts.length}/{parts.length} linh kiện - Giá trị tồn {currency(inventoryValue)}
+          </p>
         </div>
         <button className="btn-primary" onClick={() => onEdit(blankPart())}>
           <PackagePlus size={18} />
@@ -1338,41 +1516,58 @@ function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: 
 
       <div className="card overflow-hidden">
         <div className="space-y-3 p-3 md:hidden">
-          {paginatedParts.items.map((part) => (
-            <div className="rounded-lg border bg-background p-3" key={part.id}>
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold uppercase text-slate-500">{part.brand || "Không rõ hãng"}</p>
-                  <h3 className="truncate font-semibold">{part.name}</h3>
-                  <p className="text-sm text-slate-500">{part.category}</p>
+          {paginatedParts.items.map((part) => {
+            const imports = importsByPart.get(part.id) ?? [];
+            return (
+              <div className="rounded-lg border bg-background p-3" key={part.id}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase text-slate-500">{part.brand || "Không rõ hãng"}</p>
+                    <h3 className="truncate font-semibold">{part.name}</h3>
+                    <p className="text-sm text-slate-500">{part.category}</p>
+                  </div>
+                  <div className={cn("rounded-md bg-muted px-2 py-1 text-sm font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
+                    Tồn {part.quantity}
+                  </div>
                 </div>
-                <div className={cn("rounded-md bg-muted px-2 py-1 text-sm font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
-                  Tồn {part.quantity}
+                <div className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">
+                  <p className="line-clamp-2">Model: {part.compatibleModels || "-"}</p>
+                <p>Giá nhập mới nhất: {currency(part.purchaseCost)}</p>
+                  <p>Tối thiểu: {part.minimumStock}</p>
+                  {part.supplier && <p>Nhà cung cấp: {part.supplier}</p>}
+                </div>
+                <details className="mt-3 rounded-md bg-muted p-2 text-sm">
+                  <summary className="cursor-pointer font-semibold">Lịch sử nhập ({imports.length})</summary>
+                  <div className="mt-2 space-y-1 text-slate-600 dark:text-slate-300">
+                    {imports.slice(0, 3).map((partImport) => (
+                      <p key={partImport.id}>
+                        {formatDateTimeText(partImport.importDateTime)} - {partImport.quantity} cái - {currency(partImport.unitCost)}
+                      </p>
+                    ))}
+                    {imports.length === 0 && <p>Chưa có lịch sử nhập.</p>}
+                  </div>
+                </details>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  <button className="btn-secondary w-full" onClick={() => onImport(part)}>
+                    Nhập
+                  </button>
+                  <button className="btn-secondary w-full" onClick={() => onEdit(part)}>
+                    Sửa
+                  </button>
+                  <button className="btn-secondary w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
+                    Xoá
+                  </button>
                 </div>
               </div>
-              <div className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">
-                <p className="line-clamp-2">Model: {part.compatibleModels || "-"}</p>
-                <p>Giá nhập: {currency(part.purchaseCost)}</p>
-                <p>Tối thiểu: {part.minimumStock}</p>
-                {part.supplier && <p>Nhà cung cấp: {part.supplier}</p>}
-              </div>
-              <div className="mt-3 grid grid-cols-2 gap-2">
-                <button className="btn-secondary w-full" onClick={() => onEdit(part)}>
-                  Sửa
-                </button>
-                <button className="btn-secondary w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
-                  Xoá
-                </button>
-              </div>
-            </div>
-          ))}
+            );
+          })}
           {paginatedParts.items.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Không có linh kiện phù hợp bộ lọc</div>}
         </div>
         <div className="hidden max-h-[68vh] overflow-auto md:block">
-          <table className="w-full min-w-[980px] text-sm">
+          <table className="w-full min-w-[1160px] text-sm">
             <thead className="sticky top-0 z-10 bg-muted text-left">
               <tr>
-                {["Hãng", "Linh kiện", "Danh mục", "Model tương thích", "Tồn", "Tối thiểu", "Giá nhập", "Nhà cung cấp", ""].map(
+                {["Hãng", "Linh kiện", "Danh mục", "Model tương thích", "Tồn", "Tối thiểu", "Giá nhập mới nhất", "Lịch sử nhập", "Nhà cung cấp", ""].map(
                   (header) => (
                     <th className="px-4 py-3 font-semibold" key={header}>
                       {header}
@@ -1382,33 +1577,55 @@ function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: 
               </tr>
             </thead>
             <tbody>
-              {paginatedParts.items.map((part) => (
-                <tr className="border-t" key={part.id}>
-                  <td className="px-4 py-3 font-medium">{part.brand || "-"}</td>
-                  <td className="px-4 py-3">{part.name}</td>
-                  <td className="px-4 py-3">{part.category}</td>
-                  <td className="px-4 py-3">{part.compatibleModels || "-"}</td>
-                  <td className={cn("px-4 py-3 font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
-                    {part.quantity}
-                  </td>
-                  <td className="px-4 py-3">{part.minimumStock}</td>
-                  <td className="px-4 py-3">{currency(part.purchaseCost)}</td>
-                  <td className="px-4 py-3">{part.supplier || "-"}</td>
-                  <td className="px-4 py-3 text-right">
-                    <div className="flex justify-end gap-2">
-                      <button className="btn-secondary h-9" onClick={() => onEdit(part)}>
-                        Sửa
-                      </button>
-                      <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
-                        Xoá
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
+              {paginatedParts.items.map((part) => {
+                const imports = importsByPart.get(part.id) ?? [];
+                const latestImport = imports[0];
+                return (
+                  <tr className="border-t" key={part.id}>
+                    <td className="px-4 py-3 font-medium">{part.brand || "-"}</td>
+                    <td className="px-4 py-3">{part.name}</td>
+                    <td className="px-4 py-3">{part.category}</td>
+                    <td className="px-4 py-3">{part.compatibleModels || "-"}</td>
+                    <td className={cn("px-4 py-3 font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
+                      {part.quantity}
+                    </td>
+                    <td className="px-4 py-3">{part.minimumStock}</td>
+                    <td className="px-4 py-3">{currency(part.purchaseCost)}</td>
+                    <td className="px-4 py-3">
+                      <details>
+                        <summary className="cursor-pointer font-medium">
+                          {latestImport ? `${latestImport.quantity} cái - ${currency(latestImport.unitCost)}` : "Chưa có"}
+                        </summary>
+                        <div className="mt-2 space-y-1 text-xs text-slate-500">
+                          {imports.slice(0, 5).map((partImport) => (
+                            <p key={partImport.id}>
+                              {formatDateTimeText(partImport.importDateTime)} - {partImport.quantity} cái - {currency(partImport.unitCost)}
+                            </p>
+                          ))}
+                          {imports.length === 0 && <p>Chưa có lịch sử nhập.</p>}
+                        </div>
+                      </details>
+                    </td>
+                    <td className="px-4 py-3">{part.supplier || "-"}</td>
+                    <td className="px-4 py-3 text-right">
+                      <div className="flex justify-end gap-2">
+                        <button className="btn-secondary h-9" onClick={() => onImport(part)}>
+                          Nhập hàng
+                        </button>
+                        <button className="btn-secondary h-9" onClick={() => onEdit(part)}>
+                          Sửa
+                        </button>
+                        <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(part)}>
+                          Xoá
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
               {paginatedParts.items.length === 0 && (
                 <tr>
-                  <td className="px-4 py-6 text-center text-slate-500" colSpan={9}>
+                  <td className="px-4 py-6 text-center text-slate-500" colSpan={10}>
                     Không có linh kiện phù hợp bộ lọc
                   </td>
                 </tr>
@@ -1429,6 +1646,168 @@ function PartsView({ parts, onEdit, onDelete }: { parts: Part[]; onEdit: (part: 
   );
 }
 
+function PartImportsView({
+  parts,
+  partImports,
+  onDelete
+}: {
+  parts: Part[];
+  partImports: PartImport[];
+  onDelete: (partImport: PartImport) => void;
+}) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [brandFilter, setBrandFilter] = useState("all");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const brands = uniqueValues(parts.map((part) => part.brand));
+  const categories = uniqueValues(parts.map((part) => part.category));
+  const rows = partImports
+    .map((partImport) => ({ partImport, part: parts.find((part) => part.id === partImport.partId) }))
+    .sort((a, b) => b.partImport.importDateTime.localeCompare(a.partImport.importDateTime));
+  const filteredRows = rows.filter(({ partImport, part }) => {
+    const text = [
+      part?.brand,
+      part?.name,
+      part?.category,
+      part?.compatibleModels,
+      partImport.supplier,
+      partImport.notes,
+      formatDateTimeText(partImport.importDateTime)
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const matchesSearch = text.includes(searchTerm.toLowerCase());
+    const matchesBrand = brandFilter === "all" || part?.brand === brandFilter;
+    const matchesCategory = categoryFilter === "all" || part?.category === categoryFilter;
+    return matchesSearch && matchesBrand && matchesCategory;
+  });
+  const paginatedRows = paginate(filteredRows, page, pageSize);
+  const totalQuantity = filteredRows.reduce((sum, row) => sum + row.partImport.quantity, 0);
+  const totalValue = filteredRows.reduce((sum, row) => sum + row.partImport.quantity * row.partImport.unitCost, 0);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, brandFilter, categoryFilter, pageSize]);
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold">Lịch sử nhập linh kiện</h2>
+        <p className="text-sm text-slate-500">
+          {filteredRows.length}/{partImports.length} phiếu - {totalQuantity} linh kiện - Tổng tiền {currency(totalValue)}
+        </p>
+      </div>
+
+      <div className="card p-4">
+        <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_1fr]">
+          <input
+            className="field"
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Tìm linh kiện, hãng, danh mục, nhà cung cấp, ghi chú"
+          />
+          <select className="field" value={brandFilter} onChange={(event) => setBrandFilter(event.target.value)}>
+            <option value="all">Tất cả hãng</option>
+            {brands.map((brand) => (
+              <option key={brand} value={brand}>
+                {brand}
+              </option>
+            ))}
+          </select>
+          <select className="field" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+            <option value="all">Tất cả danh mục</option>
+            {categories.map((category) => (
+              <option key={category} value={category}>
+                {category}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="space-y-3 p-3 md:hidden">
+          {paginatedRows.items.map(({ partImport, part }) => (
+            <div className="rounded-lg border bg-background p-3" key={partImport.id}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-xs text-slate-500">{formatDateTimeText(partImport.importDateTime)}</p>
+                  <h3 className="truncate font-semibold">{part ? `${part.brand ? `${part.brand} - ` : ""}${part.name}` : "Linh kiện đã xoá"}</h3>
+                  <p className="text-sm text-slate-500">{part?.category ?? "-"}</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-semibold">{partImport.quantity} cái</p>
+                  <p className="text-xs text-slate-500">{currency(partImport.unitCost)}</p>
+                </div>
+              </div>
+              <div className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">
+                <p>Tổng tiền: {currency(partImport.quantity * partImport.unitCost)}</p>
+                <p>Nhà cung cấp: {partImport.supplier || "-"}</p>
+                {partImport.notes && <p className="line-clamp-2">Ghi chú: {partImport.notes}</p>}
+              </div>
+              <button className="btn-secondary mt-3 w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(partImport)}>
+                Xoá phiếu nhập
+              </button>
+            </div>
+          ))}
+          {paginatedRows.items.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Chưa có phiếu nhập phù hợp bộ lọc</div>}
+        </div>
+
+        <div className="hidden overflow-auto md:block">
+          <table className="w-full min-w-[1040px] text-sm">
+            <thead className="bg-muted text-left">
+              <tr>
+                {["Ngày giờ nhập", "Hãng", "Linh kiện", "Danh mục", "Số lượng", "Đơn giá", "Tổng tiền", "Nhà cung cấp", "Ghi chú", ""].map((header) => (
+                  <th className="px-4 py-3 font-semibold" key={header}>
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {paginatedRows.items.map(({ partImport, part }) => (
+                <tr className="border-t" key={partImport.id}>
+                  <td className="px-4 py-3">{formatDateTimeText(partImport.importDateTime)}</td>
+                  <td className="px-4 py-3">{part?.brand || "-"}</td>
+                  <td className="px-4 py-3 font-medium">{part?.name ?? "Linh kiện đã xoá"}</td>
+                  <td className="px-4 py-3">{part?.category ?? "-"}</td>
+                  <td className="px-4 py-3 font-semibold">{partImport.quantity}</td>
+                  <td className="px-4 py-3">{currency(partImport.unitCost)}</td>
+                  <td className="px-4 py-3">{currency(partImport.quantity * partImport.unitCost)}</td>
+                  <td className="px-4 py-3">{partImport.supplier || "-"}</td>
+                  <td className="px-4 py-3">{partImport.notes || "-"}</td>
+                  <td className="px-4 py-3 text-right">
+                    <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(partImport)}>
+                      Xoá
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {paginatedRows.items.length === 0 && (
+                <tr>
+                  <td className="px-4 py-6 text-center text-slate-500" colSpan={10}>
+                    Chưa có phiếu nhập phù hợp bộ lọc
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <PaginationControls
+          page={paginatedRows.page}
+          totalPages={paginatedRows.totalPages}
+          pageSize={pageSize}
+          totalItems={filteredRows.length}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
+      </div>
+    </div>
+  );
+}
+
 function SalesView({
   phones,
   customers,
@@ -1438,23 +1817,28 @@ function SalesView({
   repairParts,
   expenses,
   onDelete,
+  onUpdateDeliveryStatus,
   onSave
 }: {
   phones: Phone[];
-  customers: { id: string; name: string; phone: string }[];
+  customers: Customer[];
   sales: Sale[];
   settings: Settings;
   repairs: Repair[];
   repairParts: RepairPart[];
   expenses: Expense[];
   onDelete: (sale: Sale) => void;
+  onUpdateDeliveryStatus: (sale: Sale, status: SaleDeliveryStatus) => void;
   onSave: (input: {
     phoneId: string;
     customerName: string;
     customerPhone: string;
+    customerAddress: string;
     salePrice: number;
+    depositAmount: number;
     saleDate: string;
-    warrantyMonths: number;
+    saleDateTime: string;
+    deliveryStatus: SaleDeliveryStatus;
     notes: string;
   }) => void;
 }) {
@@ -1463,21 +1847,33 @@ function SalesView({
     phoneId: sellablePhones[0]?.id ?? "",
     customerName: "",
     customerPhone: "",
+    customerAddress: "",
     salePrice: 0,
+    depositAmount: 0,
     saleDate: todayISO(),
-    warrantyMonths: settings.defaultWarranty,
+    saleDateTime: nowLocalDateTime(),
+    deliveryStatus: "pending_delivery" as SaleDeliveryStatus,
     notes: ""
   });
   const selectedPhone = phones.find((phone) => phone.id === draft.phoneId);
   const selectedCost = selectedPhone ? phoneCost(selectedPhone, repairs, repairParts, expenses) : 0;
   const expectedProfit = Number(draft.salePrice || 0) - selectedCost;
+  const remainingAmount = Math.max(0, Number(draft.salePrice || 0) - Number(draft.depositAmount || 0));
+  const matchingCustomers = customers.filter((customer) => {
+    const text = [customer.name, customer.phone].filter(Boolean).map(normalizeCustomerIdentity).join(" ");
+    const query = [draft.customerName, draft.customerPhone].filter(Boolean).map(normalizeCustomerIdentity).join(" ");
+    return query.length >= 2 && text.includes(query);
+  });
   async function submit() {
     await onSave(draft);
     setDraft({
       ...draft,
       customerName: "",
       customerPhone: "",
+      customerAddress: "",
       salePrice: 0,
+      depositAmount: 0,
+      deliveryStatus: "pending_delivery",
       notes: ""
     });
   }
@@ -1504,15 +1900,66 @@ function SalesView({
         </div>
         <input className="field" placeholder="Tên khách hàng" value={draft.customerName} onChange={(e) => setDraft({ ...draft, customerName: e.target.value })} required />
         <input className="field" placeholder="Số điện thoại khách" value={draft.customerPhone} onChange={(e) => setDraft({ ...draft, customerPhone: e.target.value })} required />
+        <input className="field" placeholder="Địa chỉ khách hàng" value={draft.customerAddress} onChange={(e) => setDraft({ ...draft, customerAddress: e.target.value })} />
+        <select className="field" value={draft.deliveryStatus} onChange={(e) => setDraft({ ...draft, deliveryStatus: e.target.value as SaleDeliveryStatus })}>
+          {deliveryStatuses.map((status) => (
+            <option key={status} value={status}>
+              {deliveryStatusLabels[status]}
+            </option>
+          ))}
+        </select>
         <MoneyInput
           placeholder="Giá bán ra"
           value={draft.salePrice}
           onChange={(salePrice) => setDraft({ ...draft, salePrice })}
           required
         />
-        <input className="field" type="date" value={draft.saleDate} onChange={(e) => setDraft({ ...draft, saleDate: e.target.value })} />
-        <NumericInput value={draft.warrantyMonths} onChange={(warrantyMonths) => setDraft({ ...draft, warrantyMonths })} />
+        <MoneyInput
+          placeholder="Số tiền cọc"
+          value={draft.depositAmount}
+          onChange={(depositAmount) => setDraft({ ...draft, depositAmount })}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <Stat label="Đã cọc" value={currency(draft.depositAmount, settings.currency)} />
+          <Stat label="Còn lại" value={currency(remainingAmount, settings.currency)} />
+        </div>
+        <input
+          className="field"
+          type="datetime-local"
+          value={draft.saleDateTime}
+          onChange={(e) => setDraft({ ...draft, saleDateTime: e.target.value, saleDate: e.target.value.slice(0, 10) })}
+        />
         <button className="btn-primary w-full">Lưu bán hàng</button>
+        {matchingCustomers.length > 0 && (
+          <div className="space-y-3 rounded-lg border bg-muted/30 p-3 text-sm">
+            <p className="font-semibold">Lịch sử khách hàng</p>
+            <div className="mt-2 space-y-2">
+              {matchingCustomers.slice(0, 3).map((customer) => {
+                const customerSales = sales.filter((sale) => sale.customerId === customer.id);
+                return (
+                  <button
+                    type="button"
+                    className="w-full rounded-md border bg-card p-2 text-left hover:bg-muted"
+                    key={customer.id}
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        customerName: customer.name,
+                        customerPhone: customer.phone,
+                        customerAddress: customer.address ?? draft.customerAddress
+                      })
+                    }
+                  >
+                    <span className="block font-medium">{customer.name}</span>
+                    <span className="block text-xs text-slate-500">
+                      {customer.phone} - {customerSales.length} lần mua
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </form>
       <div className="card overflow-hidden xl:col-span-2">
         <div className="space-y-3 p-3 md:hidden">
@@ -1523,15 +1970,28 @@ function SalesView({
               <div className="rounded-lg border bg-background p-3" key={sale.id}>
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="text-xs text-slate-500">{sale.saleDate}</p>
+                    <p className="text-xs text-slate-500">{formatSaleDateTime(sale)}</p>
                     <h3 className="truncate font-semibold">{phone ? `${phone.brand} ${phone.model}` : "Không rõ"}</h3>
                     <p className="truncate text-sm text-slate-500">{customer?.name ?? "Không rõ khách hàng"}</p>
+                    {customer?.address && <p className="line-clamp-2 text-xs text-slate-500">{customer.address}</p>}
                   </div>
                   <div className="text-right">
                     <p className="font-semibold">{currency(sale.salePrice, settings.currency)}</p>
-                    <p className="text-xs text-slate-500">{sale.warrantyMonths} tháng</p>
+                    {sale.depositAmount > 0 && <p className="text-xs text-slate-500">Cọc {currency(sale.depositAmount, settings.currency)}</p>}
+                    <p className="text-xs text-slate-500">{deliveryStatusLabels[sale.deliveryStatus]}</p>
                   </div>
                 </div>
+                <select
+                  className="field mt-3"
+                  value={sale.deliveryStatus}
+                  onChange={(event) => onUpdateDeliveryStatus(sale, event.target.value as SaleDeliveryStatus)}
+                >
+                  {deliveryStatuses.map((status) => (
+                    <option key={status} value={status}>
+                      {deliveryStatusLabels[status]}
+                    </option>
+                  ))}
+                </select>
                 <button className="btn-secondary mt-3 w-full text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(sale)}>
                   Xoá
                 </button>
@@ -1541,10 +2001,10 @@ function SalesView({
           {sales.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Chưa có đơn bán hàng</div>}
         </div>
         <div className="hidden overflow-auto md:block">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[1040px] text-sm">
             <thead className="bg-muted text-left">
               <tr>
-                {["Ngày", "Điện thoại", "Khách hàng", "Giá bán ra", "Bảo hành", ""].map((header) => (
+                {["Ngày giờ", "Điện thoại", "Khách hàng", "Địa chỉ", "Giá bán ra", "Tiền cọc", "Còn lại", "Trạng thái", ""].map((header) => (
                   <th className="px-4 py-3 font-semibold" key={header}>
                     {header}
                   </th>
@@ -1557,11 +2017,26 @@ function SalesView({
                 const customer = customers.find((item) => item.id === sale.customerId);
                 return (
                   <tr className="border-t" key={sale.id}>
-                    <td className="px-4 py-3">{sale.saleDate}</td>
+                    <td className="px-4 py-3">{formatSaleDateTime(sale)}</td>
                     <td className="px-4 py-3">{phone ? `${phone.brand} ${phone.model}` : "Không rõ"}</td>
                     <td className="px-4 py-3">{customer?.name ?? "Không rõ"}</td>
+                    <td className="px-4 py-3">{customer?.address || "-"}</td>
                     <td className="px-4 py-3">{currency(sale.salePrice, settings.currency)}</td>
-                    <td className="px-4 py-3">{sale.warrantyMonths} tháng</td>
+                    <td className="px-4 py-3">{currency(sale.depositAmount, settings.currency)}</td>
+                    <td className="px-4 py-3">{currency(Math.max(0, sale.salePrice - sale.depositAmount), settings.currency)}</td>
+                    <td className="px-4 py-3">
+                      <select
+                        className="field h-9 min-w-40"
+                        value={sale.deliveryStatus}
+                        onChange={(event) => onUpdateDeliveryStatus(sale, event.target.value as SaleDeliveryStatus)}
+                      >
+                        {deliveryStatuses.map((status) => (
+                          <option key={status} value={status}>
+                            {deliveryStatusLabels[status]}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(sale)}>
                         Xoá
@@ -1584,7 +2059,7 @@ function CustomersView({
   phones,
   onDelete
 }: {
-  customers: { id: string; name: string; phone: string; notes?: string }[];
+  customers: Customer[];
   sales: Sale[];
   phones: Phone[];
   onDelete: (customerId: string) => void;
@@ -1599,16 +2074,26 @@ function CustomersView({
               <div>
                 <h3 className="font-semibold">{customer.name}</h3>
                 <p className="text-sm text-slate-500">{customer.phone}</p>
+                {customer.address && <p className="mt-1 line-clamp-2 text-sm text-slate-500">{customer.address}</p>}
               </div>
               <button className="btn-secondary h-9 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30" onClick={() => onDelete(customer.id)}>
                 Xoá
               </button>
             </div>
-            <div className="mt-3 space-y-1 text-sm">
+            <div className="mt-3 space-y-2 text-sm">
+              <p className="font-semibold">Lịch sử mua: {customerSales.length} đơn</p>
               {customerSales.map((sale) => {
                 const phone = phones.find((item) => item.id === sale.phoneId);
-                return <p key={sale.id}>{phone ? `${phone.brand} ${phone.model}` : "Không rõ điện thoại"}</p>;
+                return (
+                  <div className="rounded-md bg-muted p-2" key={sale.id}>
+                    <p className="font-medium">{phone ? `${phone.brand} ${phone.model}` : "Không rõ điện thoại"}</p>
+                    <p className="text-xs text-slate-500">
+                      {formatSaleDateTime(sale)} - {currency(sale.salePrice)} - Cọc {currency(sale.depositAmount)} - {deliveryStatusLabels[sale.deliveryStatus]}
+                    </p>
+                  </div>
+                );
               })}
+              {customerSales.length === 0 && <p className="text-slate-500">Chưa có giao dịch.</p>}
             </div>
           </div>
         );
@@ -1632,9 +2117,12 @@ function ReportsView(props: {
     const phone = props.phones.find((item) => item.id === sale.phoneId);
     const profit = saleProfit(sale, props.phones, props.repairs, props.repairParts, props.expenses);
     return [
-      sale.saleDate,
+      formatSaleDateTime(sale),
       phone ? `${phone.brand} ${phone.model}` : "Không rõ",
+      deliveryStatusLabels[sale.deliveryStatus],
       currency(sale.salePrice, props.settings.currency),
+      currency(sale.depositAmount, props.settings.currency),
+      currency(Math.max(0, sale.salePrice - sale.depositAmount), props.settings.currency),
       currency(profit, props.settings.currency),
       `${sale.salePrice ? Math.round((profit / sale.salePrice) * 100) : 0}%`
     ];
@@ -1657,7 +2145,7 @@ function ReportsView(props: {
         </button>
       </div>
       <div className="card overflow-hidden">
-        <DataTable headers={["Ngày", "Điện thoại", "Doanh thu", "Lợi nhuận", "Biên lợi nhuận"]} rows={rows} />
+        <DataTable headers={["Ngày", "Điện thoại", "Trạng thái", "Doanh thu", "Tiền cọc", "Còn lại", "Lợi nhuận", "Biên lợi nhuận"]} rows={rows} />
       </div>
     </div>
   );
@@ -2117,8 +2605,8 @@ function PartDialog({
           onChange={(compatibleModels) => setDraft({ ...draft, compatibleModels })}
         />
         <Input label="Nhà cung cấp" value={draft.supplier ?? ""} onChange={(supplier) => setDraft({ ...draft, supplier })} />
-        <MoneyInput label="Giá nhập" value={draft.purchaseCost} onChange={(purchaseCost) => setDraft({ ...draft, purchaseCost })} />
-        <NumericInput label="Số lượng" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} />
+        <MoneyInput label="Giá nhập mới nhất" value={draft.purchaseCost} onChange={(purchaseCost) => setDraft({ ...draft, purchaseCost })} />
+        <NumericInput label="Tồn hiện tại" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} />
         <NumericInput label="Tồn tối thiểu" value={draft.minimumStock} onChange={(minimumStock) => setDraft({ ...draft, minimumStock })} />
         <label className="md:col-span-2">
           <span className="label">Ghi chú</span>
@@ -2129,6 +2617,66 @@ function PartDialog({
             Hủy
           </button>
           <button className="btn-primary">Lưu</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function PartImportDialog({
+  part,
+  partImport,
+  onClose,
+  onSave
+}: {
+  part: Part;
+  partImport: PartImport;
+  onClose: () => void;
+  onSave: (part: Part, partImport: PartImport) => void;
+}) {
+  const [draft, setDraft] = useState(partImport);
+  const total = Number(draft.quantity || 0) * Number(draft.unitCost || 0);
+  return (
+    <Modal title={`Nhập kho: ${part.name}`} onClose={onClose}>
+      <form
+        className="grid gap-3 md:grid-cols-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSave(part, draft);
+        }}
+      >
+        <div className="rounded-lg border bg-muted/30 p-3 md:col-span-2">
+          <p className="font-semibold">
+            {part.brand ? `${part.brand} - ` : ""}
+            {part.name}
+          </p>
+          <p className="text-sm text-slate-500">Tồn hiện tại: {part.quantity}</p>
+        </div>
+        <NumericInput label="Số lượng nhập" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} required />
+        <MoneyInput label="Đơn giá nhập" value={draft.unitCost} onChange={(unitCost) => setDraft({ ...draft, unitCost })} required />
+        <Labeled label="Ngày giờ nhập">
+          <input
+            className="field"
+            type="datetime-local"
+            value={draft.importDateTime}
+            onChange={(event) => setDraft({ ...draft, importDateTime: event.target.value })}
+            required
+          />
+        </Labeled>
+        <Input label="Nhà cung cấp" value={draft.supplier ?? ""} onChange={(supplier) => setDraft({ ...draft, supplier })} />
+        <div className="rounded-lg bg-muted p-3 md:col-span-2">
+          <p className="label">Tổng tiền nhập</p>
+          <p className="mt-1 text-lg font-semibold">{currency(total)}</p>
+        </div>
+        <label className="md:col-span-2">
+          <span className="label">Ghi chú</span>
+          <textarea className="field min-h-20 py-3" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />
+        </label>
+        <div className="flex justify-end gap-2 md:col-span-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>
+            Hủy
+          </button>
+          <button className="btn-primary">Lưu nhập kho</button>
         </div>
       </form>
     </Modal>

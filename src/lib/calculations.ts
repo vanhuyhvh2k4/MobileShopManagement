@@ -27,6 +27,7 @@ export function saleProfit(
   repairParts: RepairPart[],
   expenses: Expense[]
 ) {
+  if (sale.deliveryStatus === "not_received") return 0;
   const phone = phones.find((item) => item.id === sale.phoneId);
   if (!phone) return 0;
   return sale.salePrice - phoneCost(phone, repairs, repairParts, expenses);
@@ -42,8 +43,9 @@ export function buildMetrics(args: {
 }) {
   const today = todayISO();
   const thisMonth = monthKey(today);
-  const salesToday = args.sales.filter((sale) => sale.saleDate === today);
-  const salesMonth = args.sales.filter((sale) => monthKey(sale.saleDate) === thisMonth);
+  const effectiveSales = args.sales.filter((sale) => sale.deliveryStatus !== "not_received");
+  const salesToday = effectiveSales.filter((sale) => sale.saleDate === today);
+  const salesMonth = effectiveSales.filter((sale) => monthKey(sale.saleDate) === thisMonth);
   const profitToday = salesToday.reduce(
     (sum, sale) => sum + saleProfit(sale, args.phones, args.repairs, args.repairParts, args.expenses),
     0
@@ -72,7 +74,7 @@ export function buildMetrics(args: {
 
 export function monthlySeries(sales: Sale[], phones: Phone[], repairs: Repair[], repairParts: RepairPart[], expenses: Expense[]) {
   const buckets = new Map<string, { month: string; revenue: number; profit: number; sales: number; purchases: number }>();
-  for (const sale of sales) {
+  for (const sale of sales.filter((item) => item.deliveryStatus !== "not_received")) {
     const key = monthKey(sale.saleDate);
     const bucket = buckets.get(key) ?? { month: key, revenue: 0, profit: 0, sales: 0, purchases: 0 };
     bucket.revenue += sale.salePrice;

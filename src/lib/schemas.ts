@@ -22,6 +22,8 @@ export const saleSchema = z.object({
   customerName: z.string().min(1),
   customerPhone: z.string().min(1),
   salePrice: z.coerce.number().nonnegative(),
+  depositAmount: z.coerce.number().nonnegative(),
   saleDate: z.string().min(1),
-  warrantyMonths: z.coerce.number().int().nonnegative()
+  saleDateTime: z.string().min(1),
+  deliveryStatus: z.enum(["pending_delivery", "delivered", "not_received"])
 });
