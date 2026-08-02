@@ -62,6 +62,8 @@ export type Part = {
   notes?: string;
 };
 
+export type PartImportStatus = "importing" | "imported";
+
 export type PartImport = {
   id: string;
   partId: string;
@@ -70,6 +72,7 @@ export type PartImport = {
   importDateTime: string;
   supplier?: string;
   notes?: string;
+  status: PartImportStatus;
 };
 
 export type RepairPart = {

@@ -1,4 +1,4 @@
-import type { PhoneStatus, SaleDeliveryStatus, Settings } from "../lib/types";
+import type { PartImportStatus, PhoneStatus, SaleDeliveryStatus, Settings } from "../lib/types";
 
 export const statuses: PhoneStatus[] = [
   "Purchased",
@@ -30,6 +30,13 @@ export const editablePhoneStatuses: PhoneStatus[] = [
 
 export const preRepairStatuses: PhoneStatus[] = ["Purchased", "Waiting Inspection"];
 export const stockReservedRepairStatuses: PhoneStatus[] = ["Waiting Repair", "Repairing"];
+
+export const partImportStatuses: PartImportStatus[] = ["importing", "imported"];
+
+export const partImportStatusLabels: Record<PartImportStatus, string> = {
+  importing: "Đang nhập",
+  imported: "Đã nhập"
+};
 
 export const deliveryStatuses: SaleDeliveryStatus[] = ["pending_delivery", "delivered", "not_received"];
 

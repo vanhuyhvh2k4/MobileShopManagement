@@ -31,5 +31,6 @@ export const blankPartImport = (part: Part): PartImport => ({
   unitCost: part.purchaseCost,
   importDateTime: nowLocalDateTime(),
   supplier: part.supplier,
-  notes: ""
+  notes: "",
+  status: "importing"
 });

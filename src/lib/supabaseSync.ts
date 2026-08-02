@@ -174,7 +174,8 @@ export const partImportToRow = (partImport: PartImport) => ({
   unit_cost: partImport.unitCost,
   import_datetime: partImport.importDateTime,
   supplier: partImport.supplier ?? null,
-  notes: partImport.notes ?? null
+  notes: partImport.notes ?? null,
+  status: partImport.status
 });
 
 const rowToPartImport = (row: Record<string, unknown>): PartImport => ({
@@ -184,7 +185,8 @@ const rowToPartImport = (row: Record<string, unknown>): PartImport => ({
   unitCost: Number(row.unit_cost ?? 0),
   importDateTime: String(row.import_datetime ?? ""),
   supplier: row.supplier ? String(row.supplier) : undefined,
-  notes: row.notes ? String(row.notes) : undefined
+  notes: row.notes ? String(row.notes) : undefined,
+  status: (row.status as "importing" | "imported") ?? "importing"
 });
 
 export const repairPartToRow = (repairPart: RepairPart) => ({

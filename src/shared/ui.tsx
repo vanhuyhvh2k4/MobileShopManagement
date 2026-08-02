@@ -29,7 +29,15 @@ export function ActionMenu({
 
   return (
     <div className={cn("relative inline-flex", align === "full" && "w-full")} ref={menuRef}>
-      <button className={cn("btn-secondary h-9 px-2", align === "full" && "w-full")} type="button" aria-label={label} onClick={() => setOpen((current) => !current)}>
+      <button 
+        className={cn(
+          "btn-secondary px-2",
+          align === "full" && "w-full"
+        )} 
+        type="button" 
+        aria-label={label} 
+        onClick={() => setOpen((current) => !current)}
+      >
         <MoreVertical size={18} />
       </button>
       {open && (

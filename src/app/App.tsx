@@ -123,8 +123,11 @@ export function App() {
   const [partDraft, setPartDraft] = useState<Part | null>(null);
   const [partImportDraft, setPartImportDraft] = useState<{ part: Part; partImport: PartImport } | null>(null);
   const [repairPhone, setRepairPhone] = useState<Phone | null>(null);
+  const [repairSaving, setRepairSaving] = useState(false);
   const [syncMessage, setSyncMessage] = useState(supabase ? "Đang kết nối Supabase..." : "Chưa cấu hình Supabase");
   const searchRef = useRef<HTMLInputElement>(null);
+  const repairSavingRef = useRef(false);
+  const operationLocksRef = useRef(new Set<string>());
 
   const [phones, setPhones] = useState<Phone[]>([]);
   const [faults, setFaults] = useState<PhoneFault[]>([]);
@@ -308,7 +311,36 @@ export function App() {
   const chartData = monthlySeries(sales, phones, repairs, repairParts, expenses);
   const trashFor = (tables: string[]) => deletedRows.filter((row) => tables.includes(row.table));
 
+  function beginOperation(key: string) {
+    if (operationLocksRef.current.has(key)) {
+      setSyncMessage("Thao tác trước đó vẫn đang xử lý, vui lòng chờ trong giây lát.");
+      return false;
+    }
+    operationLocksRef.current.add(key);
+    return true;
+  }
+
+  function finishOperation(key: string) {
+    operationLocksRef.current.delete(key);
+  }
+
+  function beginOperations(keys: string[]) {
+    const uniqueKeys = Array.from(new Set(keys));
+    if (uniqueKeys.some((key) => operationLocksRef.current.has(key))) {
+      setSyncMessage("Thao tác liên quan vẫn đang xử lý, vui lòng chờ trong giây lát.");
+      return false;
+    }
+    uniqueKeys.forEach((key) => operationLocksRef.current.add(key));
+    return true;
+  }
+
+  function finishOperations(keys: string[]) {
+    Array.from(new Set(keys)).forEach((key) => operationLocksRef.current.delete(key));
+  }
+
   async function savePhone(phone: Phone, faultNames: string[]) {
+    const lockKey = `save-phone:${phone.id}`;
+    if (!beginOperation(lockKey)) return;
     const existingPhone = phones.find((item) => item.id === phone.id);
     const shouldCancelRepairParts =
       existingPhone &&
@@ -316,6 +348,11 @@ export function App() {
       preRepairStatuses.includes(phone.status);
     const cancelledRepairUsage = shouldCancelRepairParts ? getPhoneRepairPartUsage(phone.id, repairs, repairParts) : null;
     const restoredParts = cancelledRepairUsage ? applyPartQuantityDelta(parts, cancelledRepairUsage.quantities, "increase") : [];
+    const partLockKeys = restoredParts.map((part) => `part:${part.id}`);
+    if (partLockKeys.length > 0 && !beginOperations(partLockKeys)) {
+      finishOperation(lockKey);
+      return;
+    }
     const savedPhone = { ...phone, updatedAt: new Date().toISOString() };
     const faultsToSave = faultNames
       .map((faultName) => faultName.trim())
@@ -347,10 +384,15 @@ export function App() {
       setPhoneDraft(null);
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperations(partLockKeys);
+      finishOperation(lockKey);
     }
   }
 
   async function savePart(part: Part) {
+    const lockKey = `part:${part.id}`;
+    if (!beginOperation(lockKey)) return;
     const existingPart = parts.find((item) => item.id === part.id);
     const isNewPart = !existingPart;
     const quantityDelta = Number(part.quantity || 0) - Number(existingPart?.quantity ?? 0);
@@ -392,62 +434,206 @@ export function App() {
       setPartDraft(null);
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function savePartImport(part: Part, partImport: PartImport) {
+    const lockKey = `part:${part.id}`;
+    if (!beginOperation(lockKey)) return;
+    const currentPart = parts.find((item) => item.id === part.id);
+    if (!currentPart) {
+      setSyncMessage("Linh kiện không còn tồn tại trong kho.");
+      finishOperation(lockKey);
+      return;
+    }
+    
+    const previousImport = partImports.find((item) => item.id === partImport.id);
+    const isUpdate = !!previousImport;
+    
+    if (isUpdate) {
+      // Nếu là update, gọi hàm updatePartImport
+      finishOperation(lockKey);
+      await updatePartImport(part, partImport, previousImport);
+      return;
+    }
+    
     const savedImport = {
       ...partImport,
       importDateTime: partImport.importDateTime ? new Date(partImport.importDateTime).toISOString() : new Date().toISOString()
     };
     const importedQuantity = Number(savedImport.quantity || 0);
     const importedCost = Number(savedImport.unitCost || 0);
-    const updatedPart = {
-      ...part,
-      quantity: part.quantity + importedQuantity,
-      purchaseCost: importedCost,
-      supplier: savedImport.supplier || part.supplier
-    };
+    if (importedQuantity <= 0) {
+      setSyncMessage("Số lượng nhập phải lớn hơn 0.");
+      finishOperation(lockKey);
+      return;
+    }
+    
+    // Chỉ cộng số lượng vào kho khi trạng thái là "imported"
+    const shouldUpdateStock = savedImport.status === "imported";
+    const updatedPart = shouldUpdateStock
+      ? {
+          ...currentPart,
+          quantity: currentPart.quantity + importedQuantity,
+          purchaseCost: importedCost,
+          supplier: savedImport.supplier || currentPart.supplier
+        }
+      : {
+          ...currentPart,
+          purchaseCost: importedCost,
+          supplier: savedImport.supplier || currentPart.supplier
+        };
+    
     try {
       await remoteUpsert.partImport(savedImport);
       await remoteUpsert.part(updatedPart);
       setPartImports((current) => [savedImport, ...current.filter((item) => item.id !== savedImport.id)]);
       setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
-      await writeLog("create", "part_imports", savedImport.id, `Nhập ${savedImport.quantity} ${part.name} vào kho`);
-      setSyncMessage("Đã nhập linh kiện vào kho");
+      await writeLog(
+        "create",
+        "part_imports",
+        savedImport.id,
+        `${shouldUpdateStock ? "Nhập" : "Tạo phiếu nhập"} ${savedImport.quantity} ${currentPart.name} ${shouldUpdateStock ? "vào kho" : "(chờ nhập)"}`
+      );
+      setSyncMessage(shouldUpdateStock ? "Đã nhập linh kiện vào kho" : "Đã tạo phiếu nhập, chưa cộng vào kho");
       setPartImportDraft(null);
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function deletePartImport(partImport: PartImport) {
     const part = parts.find((item) => item.id === partImport.partId);
     if (!part) return;
-    if (!window.confirm(`Xoá phiếu nhập ${part.name} số lượng ${partImport.quantity}? Tồn kho sẽ được trừ lại tương ứng.`)) return;
+    
+    // Chỉ trừ tồn kho nếu phiếu nhập đã có trạng thái "imported"
+    const shouldUpdateStock = partImport.status === "imported";
+    const confirmMessage = shouldUpdateStock
+      ? `Xoá phiếu nhập ${part.name} số lượng ${partImport.quantity}? Tồn kho sẽ được trừ lại tương ứng.`
+      : `Xoá phiếu nhập ${part.name} số lượng ${partImport.quantity}? (Phiếu này chưa nhập kho nên không ảnh hưởng tồn kho)`;
+    
+    if (!window.confirm(confirmMessage)) return;
+    const lockKey = `part:${part.id}`;
+    if (!beginOperation(lockKey)) return;
     const remainingImports = partImports
       .filter((item) => item.id !== partImport.id && item.partId === partImport.partId)
       .sort((a, b) => b.importDateTime.localeCompare(a.importDateTime));
-    const updatedPart = {
-      ...part,
-      quantity: Math.max(0, part.quantity - Number(partImport.quantity || 0)),
-      purchaseCost: remainingImports[0]?.unitCost ?? part.purchaseCost,
-      supplier: remainingImports[0]?.supplier || part.supplier
-    };
+    const updatedPart = shouldUpdateStock
+      ? {
+          ...part,
+          quantity: Math.max(0, part.quantity - Number(partImport.quantity || 0)),
+          purchaseCost: remainingImports[0]?.unitCost ?? part.purchaseCost,
+          supplier: remainingImports[0]?.supplier || part.supplier
+        }
+      : part;
     try {
       await softDeleteRemoteRow("part_imports", partImport.id);
-      await remoteUpsert.part(updatedPart);
+      if (shouldUpdateStock) await remoteUpsert.part(updatedPart);
       setPartImports((current) => current.filter((item) => item.id !== partImport.id));
-      setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      if (shouldUpdateStock) setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
       await writeLog("delete", "part_imports", partImport.id, `Xoá phiếu nhập ${part.name}`);
       await refreshAuditState();
-      setSyncMessage("Đã xoá phiếu nhập linh kiện");
+      setSyncMessage(shouldUpdateStock ? "Đã xoá phiếu nhập và trừ tồn kho" : "Đã xoá phiếu nhập (không ảnh hưởng tồn kho)");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
+  async function updatePartImport(part: Part, partImport: PartImport, previousImport: PartImport) {
+    const lockKey = `part:${part.id}`;
+    if (!beginOperation(lockKey)) return;
+    const currentPart = parts.find((item) => item.id === part.id);
+    if (!currentPart) {
+      setSyncMessage("Linh kiện không còn tồn tại trong kho.");
+      finishOperation(lockKey);
+      return;
+    }
+    
+    const savedImport = {
+      ...partImport,
+      importDateTime: partImport.importDateTime ? new Date(partImport.importDateTime).toISOString() : new Date().toISOString()
+    };
+    
+    const importedQuantity = Number(savedImport.quantity || 0);
+    const previousQuantity = Number(previousImport.quantity || 0);
+    const importedCost = Number(savedImport.unitCost || 0);
+    
+    if (importedQuantity <= 0) {
+      setSyncMessage("Số lượng nhập phải lớn hơn 0.");
+      finishOperation(lockKey);
+      return;
+    }
+    
+    // Xác định xem trạng thái có thay đổi không
+    const wasImported = previousImport.status === "imported";
+    const isNowImported = savedImport.status === "imported";
+    const statusChanged = wasImported !== isNowImported;
+    const quantityChanged = importedQuantity !== previousQuantity;
+    
+    // Tính toán số lượng cần cộng/trừ trong kho
+    let quantityDelta = 0;
+    if (statusChanged) {
+      if (isNowImported && !wasImported) {
+        // Chuyển từ "đang nhập" sang "đã nhập" -> cộng số lượng vào kho
+        quantityDelta = importedQuantity;
+      } else if (!isNowImported && wasImported) {
+        // Chuyển từ "đã nhập" sang "đang nhập" -> trừ số lượng khỏi kho
+        quantityDelta = -previousQuantity;
+      }
+    } else if (isNowImported && quantityChanged) {
+      // Cả hai đều "đã nhập" và số lượng thay đổi
+      quantityDelta = importedQuantity - previousQuantity;
+    }
+    
+    const updatedPart = {
+      ...currentPart,
+      quantity: Math.max(0, currentPart.quantity + quantityDelta),
+      purchaseCost: importedCost,
+      supplier: savedImport.supplier || currentPart.supplier
+    };
+    
+    try {
+      await remoteUpsert.partImport(savedImport);
+      await remoteUpsert.part(updatedPart);
+      setPartImports((current) => current.map((item) => (item.id === savedImport.id ? savedImport : item)));
+      setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      await writeLog("update", "part_imports", savedImport.id, `Cập nhật phiếu nhập ${currentPart.name}`);
+      setSyncMessage("Đã cập nhật phiếu nhập");
+      setPartImportDraft(null);
+    } catch (error) {
+      reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
+    }
+  }
+
+  async function togglePartImportStatus(partImport: PartImport) {
+    const part = parts.find((item) => item.id === partImport.partId);
+    if (!part) {
+      setSyncMessage("Linh kiện không còn tồn tại trong kho.");
+      return;
+    }
+    
+    const newStatus: "importing" | "imported" = partImport.status === "imported" ? "importing" : "imported";
+    const confirmMessage =
+      newStatus === "imported"
+        ? `Chuyển sang trạng thái "Đã nhập"? Hệ thống sẽ cộng ${partImport.quantity} ${part.name} vào kho.`
+        : `Chuyển sang trạng thái "Đang nhập"? Hệ thống sẽ trừ ${partImport.quantity} ${part.name} khỏi kho.`;
+    
+    if (!window.confirm(confirmMessage)) return;
+    
+    const updatedImport = { ...partImport, status: newStatus };
+    await updatePartImport(part, updatedImport, partImport);
+  }
+
   async function deletePhone(phone: Phone) {
+    const lockKey = `delete-phone:${phone.id}`;
     const phoneRepairs = repairs.filter((repair) => repair.phoneId === phone.id);
     const repairIds = phoneRepairs.map((repair) => repair.id);
     const phoneRepairParts = repairParts.filter((repairPart) => repairIds.includes(repairPart.repairId));
@@ -461,6 +647,8 @@ export function App() {
       ? `Xoá ${phone.brand} ${phone.model}? Máy chưa sửa xong nên hệ thống sẽ hoàn lại ${returnedPartCount} linh kiện đã chọn vào kho. Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`
       : `Xoá ${phone.brand} ${phone.model}? Máy đã sửa xong/sẵn sàng bán hoặc đã bán nên hệ thống sẽ không hoàn lại linh kiện. Dữ liệu lỗi, sửa chữa, chi phí và bán hàng liên quan cũng sẽ bị xoá.`;
     if (!window.confirm(confirmMessage)) return;
+    const partLockKeys = Object.keys(returnedQuantities).map((partId) => `part:${partId}`);
+    if (!beginOperations([lockKey, ...partLockKeys])) return;
     const restoredParts = shouldReturnParts
       ? parts
           .filter((part) => returnedQuantities[part.id])
@@ -491,11 +679,15 @@ export function App() {
       setSyncMessage(shouldReturnParts ? "Đã xoá điện thoại và hoàn lại linh kiện vào kho" : "Đã xoá điện thoại, không hoàn linh kiện vì máy đã sửa xong");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperations([lockKey, ...partLockKeys]);
     }
   }
 
   async function deletePart(part: Part) {
     if (!window.confirm(`Xoá linh kiện "${part.name}" khỏi kho? Lịch sử sửa chữa cũ vẫn giữ đơn giá đã dùng.`)) return;
+    const lockKey = `part:${part.id}`;
+    if (!beginOperation(lockKey)) return;
     try {
       await softDeleteRemoteRow("parts", part.id);
       await softDeleteRemoteWhere("part_imports", "part_id", part.id);
@@ -506,11 +698,15 @@ export function App() {
       setSyncMessage("Đã xoá linh kiện trên Supabase");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function deleteSale(sale: Sale) {
     if (!window.confirm("Xoá giao dịch bán hàng này? Máy sẽ được chuyển lại về trạng thái sẵn sàng bán.")) return;
+    const lockKey = `delete-sale:${sale.id}`;
+    if (!beginOperation(lockKey)) return;
     try {
       const phone = phones.find((item) => item.id === sale.phoneId);
       const restoredPhone = phone ? { ...phone, status: "Ready For Sale" as const, updatedAt: new Date().toISOString() } : undefined;
@@ -523,11 +719,15 @@ export function App() {
       setSyncMessage("Đã xoá giao dịch trên Supabase");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function deleteCustomer(customerId: string) {
     if (!window.confirm("Xoá khách hàng này? Các giao dịch bán hàng vẫn được giữ lại nhưng sẽ hiển thị khách hàng là không rõ.")) return;
+    const lockKey = `delete-customer:${customerId}`;
+    if (!beginOperation(lockKey)) return;
     const customer = customers.find((item) => item.id === customerId);
     try {
       await softDeleteRemoteRow("customers", customerId);
@@ -537,6 +737,8 @@ export function App() {
       setSyncMessage("Đã xoá khách hàng trên Supabase");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
@@ -554,6 +756,9 @@ export function App() {
 
   async function restoreDeletedRow(row: DeletedRow) {
     if (!window.confirm(`Khôi phục "${row.label}" từ thùng rác?`)) return;
+    const lockKey = `restore:${row.table}:${row.id}`;
+    if (!beginOperation(lockKey)) return;
+    let restorePartLockKeys: string[] = [];
     try {
       if (row.table === "phones") {
         const relatedRows = deletedRows.filter((deletedRow) => {
@@ -580,6 +785,11 @@ export function App() {
               acc[partId] = (acc[partId] ?? 0) + Number(relatedRow.row.quantity ?? 0);
               return acc;
             }, {});
+          restorePartLockKeys = Object.keys(restoredQuantities).map((partId) => `part:${partId}`);
+          if (restorePartLockKeys.length > 0 && !beginOperations(restorePartLockKeys)) {
+            restorePartLockKeys = [];
+            return;
+          }
           const updatedParts = parts
             .filter((part) => restoredQuantities[part.id])
             .map((part) => ({
@@ -592,7 +802,16 @@ export function App() {
       }
       if (row.table === "part_imports") {
         const part = parts.find((item) => item.id === String(row.row.part_id));
-        if (part) {
+        const importStatus = String(row.row.status ?? "imported");
+        // Chỉ cộng số lượng vào kho nếu trạng thái là "imported"
+        const shouldUpdateStock = importStatus === "imported";
+        
+        if (part && shouldUpdateStock) {
+          restorePartLockKeys = [`part:${part.id}`];
+          if (!beginOperations(restorePartLockKeys)) {
+            restorePartLockKeys = [];
+            return;
+          }
           await remoteUpsert.part({
             ...part,
             quantity: part.quantity + Number(row.row.quantity ?? 0),
@@ -607,6 +826,9 @@ export function App() {
       setSyncMessage("Đã khôi phục dữ liệu từ thùng rác");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperations(restorePartLockKeys);
+      finishOperation(lockKey);
     }
   }
 
@@ -622,7 +844,15 @@ export function App() {
     deliveryStatus: SaleDeliveryStatus;
     notes: string;
   }) {
-    if (!input.phoneId) return;
+    if (!input.phoneId) return false;
+    const lockKey = `save-sale:${input.phoneId}`;
+    if (!beginOperation(lockKey)) return false;
+    const phone = phones.find((item) => item.id === input.phoneId);
+    if (!phone || !["Ready For Sale", "Reserved"].includes(phone.status)) {
+      setSyncMessage("Máy này không còn ở trạng thái có thể bán. Vui lòng tải lại dữ liệu hoặc chọn máy khác.");
+      finishOperation(lockKey);
+      return false;
+    }
     const existingCustomer = customers.find(
       (customer) =>
         normalizeCustomerIdentity(customer.name) === normalizeCustomerIdentity(input.customerName) &&
@@ -645,7 +875,6 @@ export function App() {
       deliveryStatus: input.deliveryStatus,
       notes: input.notes
     };
-    const phone = phones.find((item) => item.id === input.phoneId);
     const nextPhoneStatus = input.deliveryStatus === "not_received" ? "Ready For Sale" : "Sold";
     const soldPhone = phone ? { ...phone, status: nextPhoneStatus as PhoneStatus, updatedAt: new Date().toISOString() } : undefined;
     try {
@@ -660,12 +889,18 @@ export function App() {
       if (soldPhone) setPhones((current) => current.map((item) => (item.id === soldPhone.id ? soldPhone : item)));
       await writeLog("create", "sales", sale.id, `Tạo giao dịch bán hàng ${currency(sale.salePrice)}`);
       setSyncMessage("Đã ghi bán hàng lên Supabase");
+      return true;
     } catch (error) {
       reportSyncError(error);
+      return false;
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function updateSaleDeliveryStatus(sale: Sale, deliveryStatus: SaleDeliveryStatus) {
+    const lockKey = `update-sale-status:${sale.id}`;
+    if (!beginOperation(lockKey)) return;
     const updatedSale = { ...sale, deliveryStatus };
     const phone = phones.find((item) => item.id === sale.phoneId);
     const restoredPhone = phone
@@ -684,10 +919,14 @@ export function App() {
       setSyncMessage("Đã cập nhật trạng thái vận chuyển");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function updatePhoneStatus(phone: Phone, status: PhoneStatus, message: string) {
+    const lockKey = `update-phone-status:${phone.id}`;
+    if (!beginOperation(lockKey)) return;
     const updatedPhone = { ...phone, status, updatedAt: new Date().toISOString() };
     try {
       await remoteUpsert.phone(updatedPhone);
@@ -696,6 +935,8 @@ export function App() {
       setSyncMessage(message);
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
@@ -707,9 +948,42 @@ export function App() {
     notes: string;
     selectedParts: { part: Part; quantity: number }[];
   }) {
-    const updatedParts = input.selectedParts.map(({ part, quantity }) => ({
+    if (repairSavingRef.current) return;
+    repairSavingRef.current = true;
+    setRepairSaving(true);
+    let repairOperationKeys: string[] = [];
+    const selectedQuantities = input.selectedParts.reduce<Record<string, number>>((acc, item) => {
+      const quantity = Number(item.quantity || 0);
+      if (quantity > 0) acc[item.part.id] = (acc[item.part.id] ?? 0) + quantity;
+      return acc;
+    }, {});
+    const normalizedSelectedParts = Object.entries(selectedQuantities)
+      .map(([partId, quantity]) => {
+        const currentPart = parts.find((part) => part.id === partId);
+        return currentPart ? { part: currentPart, quantity } : null;
+      })
+      .filter(Boolean) as { part: Part; quantity: number }[];
+    repairOperationKeys = [`repair:${input.phone.id}`, ...normalizedSelectedParts.map(({ part }) => `part:${part.id}`)];
+    if (!beginOperations(repairOperationKeys)) {
+      repairSavingRef.current = false;
+      setRepairSaving(false);
+      return;
+    }
+    const invalidParts = normalizedSelectedParts.filter(({ part, quantity }) => part.quantity <= 0 || quantity > part.quantity);
+    if (invalidParts.length > 0) {
+      setSyncMessage(
+        `Không đủ tồn kho: ${invalidParts
+          .map(({ part, quantity }) => `${part.name} cần ${quantity}, còn ${part.quantity}`)
+          .join("; ")}`
+      );
+      finishOperations(repairOperationKeys);
+      repairSavingRef.current = false;
+      setRepairSaving(false);
+      return;
+    }
+    const updatedParts = normalizedSelectedParts.map(({ part, quantity }) => ({
       ...part,
-      quantity: Math.max(0, part.quantity - quantity)
+      quantity: part.quantity - quantity
     }));
     const savedPhone = {
       ...input.phone,
@@ -726,7 +1000,7 @@ export function App() {
       laborCost: input.laborCost,
       notes: input.notes
     };
-    const replacements: RepairPart[] = input.selectedParts.map(({ part, quantity }) => ({
+    const replacements: RepairPart[] = normalizedSelectedParts.map(({ part, quantity }) => ({
       id: uid("repairpart"),
       repairId,
       partId: part.id,
@@ -747,6 +1021,10 @@ export function App() {
       setRepairPhone(null);
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperations(repairOperationKeys);
+      repairSavingRef.current = false;
+      setRepairSaving(false);
     }
   }
 
@@ -778,8 +1056,10 @@ export function App() {
 
   async function handleRestore(file?: File) {
     if (!file) return;
-    const payload = JSON.parse(await file.text()) as BackupPayload;
+    const lockKey = "restore-backup";
+    if (!beginOperation(lockKey)) return;
     try {
+      const payload = JSON.parse(await file.text()) as BackupPayload;
       await pushBackupToSupabase(payload);
       setPhones(payload.phones ?? []);
       setFaults(payload.faults ?? []);
@@ -794,15 +1074,21 @@ export function App() {
       setSyncMessage("Đã khôi phục và ghi dữ liệu lên Supabase");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
   async function handlePushLocalToSupabase() {
+    const lockKey = "push-local-backup";
+    if (!beginOperation(lockKey)) return;
     try {
       await pushBackupToSupabase(makeBackupPayload());
       setSyncMessage("Đã đẩy dữ liệu hiện tại lên Supabase");
     } catch (error) {
       reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
     }
   }
 
@@ -955,6 +1241,8 @@ export function App() {
               deletedRows={trashFor(["part_imports"])}
               onRestoreDeleted={restoreDeletedRow}
               onDelete={deletePartImport}
+              onEdit={(part, partImport) => setPartImportDraft({ part, partImport })}
+              onToggleStatus={togglePartImportStatus}
             />
           )}
           {view === "sales" && (
@@ -1035,6 +1323,7 @@ export function App() {
           repairParts={repairParts}
           expenses={expenses}
           settings={settings}
+          saving={repairSaving}
           onClose={() => setRepairPhone(null)}
           onSave={saveRepair}
         />
@@ -1135,6 +1424,7 @@ function Dashboard({
   settings: Settings;
   parts: Part[];
 }) {
+  const [detailView, setDetailView] = useState<"lowStock" | null>(null);
   const lowStockParts = parts.filter((part) => part.quantity <= part.minimumStock);
   const topCards = [
     {
@@ -1247,7 +1537,17 @@ function Dashboard({
             <h2 className="text-base font-semibold">Cảnh báo tồn linh kiện</h2>
             <p className="text-sm text-slate-500">{lowStockParts.length} linh kiện cần nhập thêm hoặc kiểm tra lại tồn.</p>
           </div>
-          <span className="rounded-md bg-muted px-3 py-2 text-sm font-semibold">{lowStockParts.length}/{parts.length}</span>
+          <div className="flex items-center gap-2">
+            <span className="rounded-md bg-muted px-3 py-2 text-sm font-semibold">{lowStockParts.length}/{parts.length}</span>
+            {lowStockParts.length > 9 && (
+              <button 
+                className="btn-secondary h-9"
+                onClick={() => setDetailView("lowStock")}
+              >
+                Xem tất cả
+              </button>
+            )}
+          </div>
         </div>
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {lowStockParts.slice(0, 9).map((part) => (
@@ -1267,6 +1567,34 @@ function Dashboard({
           {lowStockParts.length === 0 && <div className="py-6 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">Kho linh kiện đang ổn.</div>}
         </div>
       </div>
+      
+      {/* Modal chi tiết linh kiện sắp hết */}
+      {detailView === "lowStock" && (
+        <Modal title="Tất cả linh kiện sắp hết" onClose={() => setDetailView(null)}>
+          <div className="max-h-[70vh] space-y-2 overflow-auto">
+            {lowStockParts.map((part) => (
+              <div className="flex items-center justify-between gap-3 rounded-lg border p-3" key={part.id}>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase text-slate-500">{part.brand || "Không rõ"}</p>
+                  <p className="font-semibold">{part.name}</p>
+                  <p className="text-sm text-slate-500">{part.category}</p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="rounded-md bg-red-100 px-2 py-1 text-sm font-semibold text-red-700 dark:bg-red-900/30 dark:text-red-200">
+                    {part.quantity}/{part.minimumStock}
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">{currency(part.purchaseCost)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4 flex justify-end">
+            <button className="btn-secondary" onClick={() => setDetailView(null)}>
+              Đóng
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1301,38 +1629,40 @@ function PhonesView(props: {
       .filter((phone) => brandFilter === "all" || phone.brand === brandFilter)
       .map((phone) => phone.model)
   );
-  const filteredPhones = props.phones.filter((phone) => {
-    const phoneFaults = props.faults.filter((fault) => fault.phoneId === phone.id);
-    const repairCount = props.repairs.filter((repair) => repair.phoneId === phone.id).length;
-    const text = [
-      phone.imei1,
-      phone.imei2,
-      phone.brand,
-      phone.model,
-      phone.sellerName,
-      phone.sellerPhone,
-      phone.notes,
-      phone.color,
-      phone.storage,
-      phone.status,
-      statusLabels[phone.status],
-      ...phoneFaults.map((fault) => fault.faultName)
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    const matchesSearch = text.includes(searchTerm.toLowerCase());
-    const matchesBrand = brandFilter === "all" || phone.brand === brandFilter;
-    const matchesModel = modelFilter === "all" || phone.model === modelFilter;
-    const matchesStatus = statusFilter === "all" || phone.status === statusFilter;
-    const matchesRepair =
-      repairFilter === "all" ||
-      (repairFilter === "has_fault" && phoneFaults.length > 0) ||
-      (repairFilter === "no_fault" && phoneFaults.length === 0) ||
-      (repairFilter === "has_repair" && repairCount > 0) ||
-      (repairFilter === "no_repair" && repairCount === 0);
-    return matchesSearch && matchesBrand && matchesModel && matchesStatus && matchesRepair;
-  });
+  const filteredPhones = props.phones
+    .filter((phone) => {
+      const phoneFaults = props.faults.filter((fault) => fault.phoneId === phone.id);
+      const repairCount = props.repairs.filter((repair) => repair.phoneId === phone.id).length;
+      const text = [
+        phone.imei1,
+        phone.imei2,
+        phone.brand,
+        phone.model,
+        phone.sellerName,
+        phone.sellerPhone,
+        phone.notes,
+        phone.color,
+        phone.storage,
+        phone.status,
+        statusLabels[phone.status],
+        ...phoneFaults.map((fault) => fault.faultName)
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      const matchesSearch = text.includes(searchTerm.toLowerCase());
+      const matchesBrand = brandFilter === "all" || phone.brand === brandFilter;
+      const matchesModel = modelFilter === "all" || phone.model === modelFilter;
+      const matchesStatus = statusFilter === "all" || phone.status === statusFilter;
+      const matchesRepair =
+        repairFilter === "all" ||
+        (repairFilter === "has_fault" && phoneFaults.length > 0) ||
+        (repairFilter === "no_fault" && phoneFaults.length === 0) ||
+        (repairFilter === "has_repair" && repairCount > 0) ||
+        (repairFilter === "no_repair" && repairCount === 0);
+      return matchesSearch && matchesBrand && matchesModel && matchesStatus && matchesRepair;
+    })
+    .sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate)); // Sắp xếp theo ngày mua mới nhất
   const paginatedPhones = paginate(filteredPhones, page, pageSize);
 
   useEffect(() => {
@@ -2024,17 +2354,22 @@ function PartImportsView({
   partImports,
   deletedRows,
   onRestoreDeleted,
-  onDelete
+  onDelete,
+  onEdit,
+  onToggleStatus
 }: {
   parts: Part[];
   partImports: PartImport[];
   deletedRows: DeletedRow[];
   onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (partImport: PartImport) => void;
+  onEdit: (part: Part, partImport: PartImport) => void;
+  onToggleStatus: (partImport: PartImport) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
   const [categoryFilter, setCategoryFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | "importing" | "imported">("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const brands = uniqueValues(parts.map((part) => part.brand));
@@ -2058,7 +2393,8 @@ function PartImportsView({
     const matchesSearch = text.includes(searchTerm.toLowerCase());
     const matchesBrand = brandFilter === "all" || part?.brand === brandFilter;
     const matchesCategory = categoryFilter === "all" || part?.category === categoryFilter;
-    return matchesSearch && matchesBrand && matchesCategory;
+    const matchesStatus = statusFilter === "all" || partImport.status === statusFilter;
+    return matchesSearch && matchesBrand && matchesCategory && matchesStatus;
   });
   const paginatedRows = paginate(filteredRows, page, pageSize);
   const totalQuantity = filteredRows.reduce((sum, row) => sum + row.partImport.quantity, 0);
@@ -2066,7 +2402,7 @@ function PartImportsView({
 
   useEffect(() => {
     setPage(1);
-  }, [searchTerm, brandFilter, categoryFilter, pageSize]);
+  }, [searchTerm, brandFilter, categoryFilter, statusFilter, pageSize]);
 
   return (
     <div className="space-y-4">
@@ -2078,7 +2414,7 @@ function PartImportsView({
       </div>
 
       <div className="card p-4">
-        <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_1fr]">
+        <div className="grid gap-3 lg:grid-cols-[1.2fr_1fr_1fr_1fr]">
           <input
             className="field"
             value={searchTerm}
@@ -2101,6 +2437,11 @@ function PartImportsView({
               </option>
             ))}
           </select>
+          <select className="field" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | "importing" | "imported")}>
+            <option value="all">Tất cả trạng thái</option>
+            <option value="importing">Đang nhập</option>
+            <option value="imported">Đã nhập</option>
+          </select>
         </div>
       </div>
 
@@ -2121,13 +2462,31 @@ function PartImportsView({
               </div>
               <div className="mt-3 space-y-1 text-sm text-slate-600 dark:text-slate-300">
                 <p>Tổng tiền: {currency(partImport.quantity * partImport.unitCost)}</p>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">Trạng thái:</span>
+                  <button
+                    onClick={() => onToggleStatus(partImport)}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium transition-colors hover:opacity-80",
+                      partImport.status === "imported"
+                        ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+                        : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"
+                    )}
+                    title="Click để thay đổi trạng thái"
+                  >
+                    {partImport.status === "imported" ? "Đã nhập ✓" : "Đang nhập →"}
+                  </button>
+                </div>
                 <p>Nhà cung cấp: {partImport.supplier || "-"}</p>
                 {partImport.notes && <p className="line-clamp-2">Ghi chú: {partImport.notes}</p>}
               </div>
               <div className="mt-3 flex justify-end">
                 <ActionMenu
                   label="Thao tác phiếu nhập"
-                  items={[{ label: "Xoá phiếu nhập", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }]}
+                  items={[
+                    { label: "Sửa", icon: <Pencil size={16} />, onClick: () => part && onEdit(part, partImport) },
+                    { label: "Xoá phiếu nhập", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }
+                  ]}
                 />
               </div>
             </div>
@@ -2136,10 +2495,10 @@ function PartImportsView({
         </div>
 
         <div className="hidden overflow-auto md:block">
-          <table className="w-full min-w-[1040px] text-sm">
+          <table className="w-full min-w-[1100px] text-sm">
             <thead className="bg-muted text-left">
               <tr>
-                {["Ngày giờ nhập", "Hãng", "Linh kiện", "Danh mục", "Số lượng", "Đơn giá", "Tổng tiền", "Nhà cung cấp", "Ghi chú", ""].map((header) => (
+                {["Ngày giờ nhập", "Hãng", "Linh kiện", "Danh mục", "Số lượng", "Đơn giá", "Tổng tiền", "Trạng thái", "Nhà cung cấp", "Ghi chú", ""].map((header) => (
                   <th className="px-4 py-3 font-semibold" key={header}>
                     {header}
                   </th>
@@ -2156,19 +2515,36 @@ function PartImportsView({
                   <td className="px-4 py-3 font-semibold">{partImport.quantity}</td>
                   <td className="px-4 py-3">{currency(partImport.unitCost)}</td>
                   <td className="px-4 py-3">{currency(partImport.quantity * partImport.unitCost)}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => onToggleStatus(partImport)}
+                      className={cn(
+                        "inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-medium transition-colors hover:opacity-80",
+                        partImport.status === "imported"
+                          ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+                          : "bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300"
+                      )}
+                      title="Click để thay đổi trạng thái"
+                    >
+                      {partImport.status === "imported" ? "Đã nhập ✓" : "Đang nhập →"}
+                    </button>
+                  </td>
                   <td className="px-4 py-3">{partImport.supplier || "-"}</td>
                   <td className="px-4 py-3">{partImport.notes || "-"}</td>
                   <td className="px-4 py-3 text-right">
                     <ActionMenu
                       label="Thao tác phiếu nhập"
-                      items={[{ label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }]}
+                      items={[
+                        { label: "Sửa", icon: <Pencil size={16} />, onClick: () => part && onEdit(part, partImport) },
+                        { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(partImport) }
+                      ]}
                     />
                   </td>
                 </tr>
               ))}
               {paginatedRows.items.length === 0 && (
                 <tr>
-                  <td className="px-4 py-6 text-center text-slate-500" colSpan={10}>
+                  <td className="px-4 py-6 text-center text-slate-500" colSpan={11}>
                     Chưa có phiếu nhập phù hợp bộ lọc
                   </td>
                 </tr>
@@ -2226,9 +2602,61 @@ function SalesView({
     saleDateTime: string;
     deliveryStatus: SaleDeliveryStatus;
     notes: string;
-  }) => void;
+  }) => Promise<boolean | void> | boolean | void;
 }) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<"all" | SaleDeliveryStatus>("all");
+  const [dateFilter, setDateFilter] = useState<"all" | "today" | "week" | "month">("all");
+  
   const sellablePhones = phones.filter((phone) => phone.status === "Ready For Sale" || phone.status === "Reserved");
+  
+  // Filter sales
+  const filteredSales = sales.filter((sale) => {
+    const phone = phones.find((p) => p.id === sale.phoneId);
+    const customer = customers.find((c) => c.id === sale.customerId);
+    
+    // Search filter
+    const text = [
+      phone?.brand,
+      phone?.model,
+      phone?.imei1,
+      customer?.name,
+      customer?.phone,
+      customer?.address,
+      sale.notes,
+      formatSaleDateTime(sale)
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    const matchesSearch = text.includes(searchTerm.toLowerCase());
+    
+    // Delivery status filter
+    const matchesStatus = deliveryStatusFilter === "all" || sale.deliveryStatus === deliveryStatusFilter;
+    
+    // Date filter
+    let matchesDate = true;
+    if (dateFilter !== "all") {
+      const saleDate = new Date(sale.saleDateTime || sale.saleDate);
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      
+      if (dateFilter === "today") {
+        matchesDate = saleDate >= today;
+      } else if (dateFilter === "week") {
+        const weekAgo = new Date(today);
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        matchesDate = saleDate >= weekAgo;
+      } else if (dateFilter === "month") {
+        const monthAgo = new Date(today);
+        monthAgo.setMonth(monthAgo.getMonth() - 1);
+        matchesDate = saleDate >= monthAgo;
+      }
+    }
+    
+    return matchesSearch && matchesStatus && matchesDate;
+  });
+  
   const [draft, setDraft] = useState({
     phoneId: sellablePhones[0]?.id ?? "",
     customerName: "",
@@ -2241,6 +2669,7 @@ function SalesView({
     deliveryStatus: "pending_delivery" as SaleDeliveryStatus,
     notes: ""
   });
+  const [savingSale, setSavingSale] = useState(false);
   const selectedPhone = phones.find((phone) => phone.id === draft.phoneId);
   const selectedCost = selectedPhone ? phoneCost(selectedPhone, repairs, repairParts, expenses) : 0;
   const expectedProfit = Number(draft.salePrice || 0) - selectedCost;
@@ -2251,17 +2680,24 @@ function SalesView({
     return query.length >= 2 && text.includes(query);
   });
   async function submit() {
-    await onSave(draft);
-    setDraft({
-      ...draft,
-      customerName: "",
-      customerPhone: "",
-      customerAddress: "",
-      salePrice: 0,
-      depositAmount: 0,
-      deliveryStatus: "pending_delivery",
-      notes: ""
-    });
+    if (savingSale) return;
+    setSavingSale(true);
+    try {
+      const saved = await onSave(draft);
+      if (saved === false) return;
+      setDraft({
+        ...draft,
+        customerName: "",
+        customerPhone: "",
+        customerAddress: "",
+        salePrice: 0,
+        depositAmount: 0,
+        deliveryStatus: "pending_delivery",
+        notes: ""
+      });
+    } finally {
+      setSavingSale(false);
+    }
   }
   return (
     <div className="grid gap-4 xl:grid-cols-3">
@@ -2315,7 +2751,9 @@ function SalesView({
           value={draft.saleDateTime}
           onChange={(e) => setDraft({ ...draft, saleDateTime: e.target.value, saleDate: e.target.value.slice(0, 10) })}
         />
-        <button className="btn-primary w-full">Lưu bán hàng</button>
+        <button className="btn-primary w-full" disabled={savingSale || !draft.phoneId}>
+          {savingSale ? "Đang lưu..." : "Lưu bán hàng"}
+        </button>
         {matchingCustomers.length > 0 && (
           <div className="space-y-3 rounded-lg border bg-muted/30 p-3 text-sm">
             <p className="font-semibold">Lịch sử khách hàng</p>
@@ -2348,8 +2786,51 @@ function SalesView({
         )}
       </form>
       <div className="card overflow-hidden xl:col-span-2">
+        {/* Filter section */}
+        <div className="border-b p-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="font-semibold">Danh sách bán hàng</h3>
+            <p className="text-sm text-slate-500">
+              {filteredSales.length}/{sales.length} giao dịch
+            </p>
+          </div>
+          <div className="grid gap-2 md:grid-cols-3">
+            <input
+              className="field"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Tìm khách, điện thoại, IMEI..."
+            />
+            <select 
+              className="field" 
+              value={deliveryStatusFilter} 
+              onChange={(e) => setDeliveryStatusFilter(e.target.value as "all" | SaleDeliveryStatus)}
+            >
+              <option value="all">Tất cả trạng thái</option>
+              {deliveryStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {deliveryStatusLabels[status]}
+                </option>
+              ))}
+            </select>
+            <select className="field" value={dateFilter} onChange={(e) => setDateFilter(e.target.value as typeof dateFilter)}>
+              <option value="all">Tất cả thời gian</option>
+              <option value="today">Hôm nay</option>
+              <option value="week">7 ngày qua</option>
+              <option value="month">30 ngày qua</option>
+            </select>
+          </div>
+        </div>
+        
         <div className="space-y-3 p-3 md:hidden">
-          {sales.map((sale) => {
+          {filteredSales
+            .slice()
+            .sort((a, b) => {
+              const dateA = a.saleDateTime || a.saleDate;
+              const dateB = b.saleDateTime || b.saleDate;
+              return dateB.localeCompare(dateA); // Sắp xếp theo ngày bán mới nhất
+            })
+            .map((sale) => {
             const phone = phones.find((item) => item.id === sale.phoneId);
             const customer = customers.find((item) => item.id === sale.customerId);
             return (
@@ -2401,7 +2882,14 @@ function SalesView({
               </tr>
             </thead>
             <tbody>
-              {sales.map((sale) => {
+              {filteredSales
+                .slice()
+                .sort((a, b) => {
+                  const dateA = a.saleDateTime || a.saleDate;
+                  const dateB = b.saleDateTime || b.saleDate;
+                  return dateB.localeCompare(dateA); // Sắp xếp theo ngày bán mới nhất
+                })
+                .map((sale) => {
                 const phone = phones.find((item) => item.id === sale.phoneId);
                 const customer = customers.find((item) => item.id === sale.customerId);
                 return (
@@ -2463,7 +2951,13 @@ function CustomersView({
     <div className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {customers.map((customer) => {
-          const customerSales = sales.filter((sale) => sale.customerId === customer.id);
+          const customerSales = sales
+            .filter((sale) => sale.customerId === customer.id)
+            .sort((a, b) => {
+              const dateA = a.saleDateTime || a.saleDate;
+              const dateB = b.saleDateTime || b.saleDate;
+              return dateB.localeCompare(dateA); // Sắp xếp theo ngày bán mới nhất
+            });
           return (
             <div className="card p-4" key={customer.id}>
               <div className="flex items-start justify-between gap-3">

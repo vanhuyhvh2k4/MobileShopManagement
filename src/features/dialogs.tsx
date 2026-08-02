@@ -131,6 +131,7 @@ export function RepairDialog({
   repairParts,
   expenses,
   settings,
+  saving = false,
   onClose,
   onSave
 }: {
@@ -140,6 +141,7 @@ export function RepairDialog({
   repairParts: RepairPart[];
   expenses: Expense[];
   settings: Settings;
+  saving?: boolean;
   onClose: () => void;
   onSave: (input: {
     phone: Phone;
@@ -148,8 +150,9 @@ export function RepairDialog({
     laborCost: number;
     notes: string;
     selectedParts: { part: Part; quantity: number }[];
-  }) => void;
+  }) => Promise<void> | void;
 }) {
+  const [submitting, setSubmitting] = useState(false);
   const [description, setDescription] = useState("Thay linh kiện hư hỏng");
   const [technician, setTechnician] = useState("");
   const [laborCost, setLaborCost] = useState(0);
@@ -191,29 +194,58 @@ export function RepairDialog({
   const currentCost = phoneCost(phone, repairs, repairParts, expenses);
   const selectedPartCost = selectedParts.reduce((sum, item) => sum + item.part.purchaseCost * item.quantity, 0);
   const newTotalCost = currentCost + selectedPartCost + Number(laborCost || 0);
+  const isProcessing = saving || submitting;
+  const cannotSave = isProcessing || (selectedParts.length === 0 && Number(laborCost || 0) === 0);
+  const selectedQuantityTotal = selectedParts.reduce((sum, item) => sum + item.quantity, 0);
+  const setPartQuantity = (part: Part, quantity: number) => {
+    setQuantities({
+      ...quantities,
+      [part.id]: Math.min(part.quantity, Math.max(0, quantity))
+    });
+  };
+
   return (
     <Modal title={`Thay linh kiện - ${phone.brand} ${phone.model}`} onClose={onClose}>
       <form
-        className="space-y-4"
-        onSubmit={(event) => {
+        className="space-y-4 pb-24 md:pb-0"
+        onSubmit={async (event) => {
           event.preventDefault();
-          void onSave({
-            phone,
-            description,
-            technician,
-            laborCost: Number(laborCost || 0),
-            notes,
-            selectedParts
-          });
+          if (cannotSave) return;
+          setSubmitting(true);
+          try {
+            await onSave({
+              phone,
+              description,
+              technician,
+              laborCost: Number(laborCost || 0),
+              notes,
+              selectedParts
+            });
+          } finally {
+            setSubmitting(false);
+          }
         }}
       >
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-2 md:grid-cols-3 md:gap-3">
           <Stat label="Giá nhập máy" value={currency(phone.purchasePrice, settings.currency)} />
           <Stat label="Chi phí hiện tại" value={currency(currentCost, settings.currency)} />
           <Stat label="Tổng vốn sau thay" value={currency(newTotalCost, settings.currency)} />
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
+        <details className="rounded-lg border bg-background p-3 md:hidden">
+          <summary className="cursor-pointer font-semibold">Thông tin sửa chữa</summary>
+          <div className="mt-3 grid gap-3">
+            <Input label="Nội dung sửa chữa" value={description} onChange={setDescription} required />
+            <Input label="Kỹ thuật viên" value={technician} onChange={setTechnician} />
+            <MoneyInput label="Công sửa" value={laborCost} onChange={setLaborCost} />
+            <label>
+              <span className="label">Ghi chú sửa chữa</span>
+              <textarea className="field min-h-20 py-3" value={notes} onChange={(event) => setNotes(event.target.value)} />
+            </label>
+          </div>
+        </details>
+
+        <div className="hidden gap-3 md:grid md:grid-cols-2">
           <Input label="Nội dung sửa chữa" value={description} onChange={setDescription} required />
           <Input label="Kỹ thuật viên" value={technician} onChange={setTechnician} />
           <MoneyInput label="Công sửa" value={laborCost} onChange={setLaborCost} />
@@ -224,7 +256,7 @@ export function RepairDialog({
         </div>
 
         <div className="rounded-lg border bg-muted/30 p-3">
-          <div className="grid gap-3 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
+          <div className="grid gap-2 md:gap-3 lg:grid-cols-[1.4fr_1fr_1fr_1fr]">
             <input
               className="field"
               value={partSearch}
@@ -263,13 +295,16 @@ export function RepairDialog({
           </label>
         </div>
 
-        {selectedParts.length > 0 && (
-          <div className="rounded-lg border border-primary/30 bg-primary/10 p-3">
-            <p className="mb-2 text-sm font-semibold">Linh kiện đã chọn</p>
-            <div className="flex flex-wrap gap-2">
+        <div className="sticky top-0 z-20 rounded-lg border border-primary/30 bg-card/95 p-3 shadow-sm backdrop-blur md:static md:bg-primary/10 md:shadow-none">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold">Đã chọn {selectedQuantityTotal} linh kiện</p>
+            <p className="text-sm font-semibold">{currency(selectedPartCost, settings.currency)}</p>
+          </div>
+          {selectedParts.length > 0 && (
+            <div className="mt-2 flex gap-2 overflow-x-auto pb-1 md:flex-wrap md:overflow-visible">
               {selectedParts.map(({ part, quantity }) => (
-                <span className="inline-flex items-center gap-2 rounded-md bg-card px-2 py-1 text-sm" key={part.id}>
-                  <span>
+                <span className="inline-flex shrink-0 items-center gap-2 rounded-md bg-muted px-2 py-1 text-sm" key={part.id}>
+                  <span className="max-w-52 truncate">
                     {part.brand ? `${part.brand} - ` : ""}
                     {part.name} x{quantity}
                   </span>
@@ -284,10 +319,61 @@ export function RepairDialog({
                 </span>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        <div className="overflow-hidden rounded-lg border">
+        <div className="space-y-3 md:hidden">
+          {filteredParts.map((part) => {
+            const quantity = quantities[part.id] ?? 0;
+            const recommended = isPartRecommendedForPhone(part, phone);
+            return (
+              <div className={cn("rounded-lg border bg-background p-3", quantity > 0 && "border-primary bg-primary/5")} key={part.id}>
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {recommended && (
+                        <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200">
+                          Khớp máy
+                        </span>
+                      )}
+                      <span className={cn("rounded-md bg-muted px-2 py-1 text-xs font-semibold", part.quantity <= part.minimumStock && "text-red-600")}>
+                        Tồn {part.quantity}
+                      </span>
+                    </div>
+                    <h3 className="mt-2 line-clamp-2 font-semibold">{part.name}</h3>
+                    <p className="text-sm text-slate-500">
+                      {[part.brand, part.category].filter(Boolean).join(" - ") || "Chưa phân loại"}
+                    </p>
+                    {part.compatibleModels && <p className="mt-1 line-clamp-2 text-xs text-slate-500">{part.compatibleModels}</p>}
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="font-semibold">{currency(part.purchaseCost, settings.currency)}</p>
+                    {quantity > 0 && <p className="text-xs text-slate-500">{currency(quantity * part.purchaseCost, settings.currency)}</p>}
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-[44px_1fr_44px] items-center gap-2">
+                  <button className="btn-secondary h-11 px-0 text-lg" type="button" disabled={quantity <= 0} onClick={() => setPartQuantity(part, quantity - 1)}>
+                    -
+                  </button>
+                  <input
+                    className="field h-11 text-center text-base font-semibold"
+                    type="text"
+                    inputMode="numeric"
+                    value={quantity === 0 ? "" : String(quantity)}
+                    placeholder="0"
+                    onChange={(event) => setPartQuantity(part, Number(event.target.value.replace(/\D/g, "")))}
+                  />
+                  <button className="btn-secondary h-11 px-0 text-lg" type="button" disabled={quantity >= part.quantity} onClick={() => setPartQuantity(part, quantity + 1)}>
+                    +
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {filteredParts.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Không có linh kiện phù hợp bộ lọc</div>}
+        </div>
+
+        <div className="hidden overflow-hidden rounded-lg border md:block">
           <div className="max-h-[46vh] overflow-auto">
           <table className="w-full min-w-[980px] text-sm">
             <thead className="sticky top-0 z-10 bg-muted text-left">
@@ -333,12 +419,7 @@ export function RepairDialog({
                         min={0}
                         max={part.quantity}
                         value={quantity === 0 ? "" : String(quantity)}
-                        onChange={(event) =>
-                          setQuantities({
-                            ...quantities,
-                            [part.id]: Math.min(part.quantity, Math.max(0, Number(event.target.value.replace(/\D/g, ""))))
-                          })
-                        }
+                        onChange={(event) => setPartQuantity(part, Number(event.target.value.replace(/\D/g, "")))}
                       />
                     </td>
                     <td className="px-4 py-3 font-medium">
@@ -359,17 +440,23 @@ export function RepairDialog({
           </div>
         </div>
 
-        <div className="rounded-md bg-muted p-3 text-sm">
+        <div className="hidden rounded-md bg-muted p-3 text-sm md:block">
           Giá bán đề xuất sẽ bổ sung sau. Hiện tại hệ thống chỉ tính tổng vốn để bạn tự quyết định giá bán ra.
         </div>
 
-        <div className="flex justify-end gap-2">
+        <div className="fixed inset-x-0 bottom-0 z-[60] border-t bg-card p-3 shadow-lg md:static md:border-0 md:bg-transparent md:p-0 md:shadow-none">
+          <div className="mx-auto flex max-w-6xl items-center gap-2">
+            <div className="min-w-0 flex-1 md:hidden">
+              <p className="text-xs text-slate-500">Tổng vốn sau thay</p>
+              <p className="truncate font-semibold">{currency(newTotalCost, settings.currency)}</p>
+            </div>
           <button type="button" className="btn-secondary" onClick={onClose}>
             Hủy
           </button>
-          <button className="btn-primary" disabled={selectedParts.length === 0 && Number(laborCost || 0) === 0}>
-            Lưu thay linh kiện
+          <button className="btn-primary flex-1 md:flex-none" disabled={cannotSave}>
+            {isProcessing ? "Đang lưu..." : "Lưu thay linh kiện"}
           </button>
+          </div>
         </div>
       </form>
     </Modal>
@@ -490,6 +577,12 @@ export function PartImportDialog({
           />
         </Labeled>
         <Input label="Nhà cung cấp" value={draft.supplier ?? ""} onChange={(supplier) => setDraft({ ...draft, supplier })} />
+        <Labeled label="Trạng thái">
+          <select className="field" value={draft.status} onChange={(event) => setDraft({ ...draft, status: event.target.value as "importing" | "imported" })} required>
+            <option value="importing">Đang nhập</option>
+            <option value="imported">Đã nhập</option>
+          </select>
+        </Labeled>
         <div className="rounded-lg bg-muted p-3 md:col-span-2">
           <p className="label">Tổng tiền nhập</p>
           <p className="mt-1 text-lg font-semibold">{currency(total)}</p>
@@ -508,4 +601,3 @@ export function PartImportDialog({
     </Modal>
   );
 }
-
