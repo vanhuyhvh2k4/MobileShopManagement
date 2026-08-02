@@ -472,9 +472,11 @@ export function PartDialog({
   part: Part;
   parts: Part[];
   onClose: () => void;
-  onSave: (part: Part) => void;
+  onSave: (part: Part, initialStatus?: "importing" | "imported") => void;
 }) {
   const [draft, setDraft] = useState(part);
+  const [initialStatus, setInitialStatus] = useState<"importing" | "imported">("importing");
+  const isNewPart = draft.quantity === 0 || !parts.find((p) => p.id === draft.id);
   const brandOptions = uniqueValues(parts.map((item) => item.brand));
   const categoryOptions = uniqueValues(parts.map((item) => item.category));
   const modelOptions = uniqueValues(
@@ -488,7 +490,7 @@ export function PartDialog({
         className="grid gap-3 md:grid-cols-2"
         onSubmit={(event) => {
           event.preventDefault();
-          void onSave(draft);
+          void onSave(draft, isNewPart ? initialStatus : undefined);
         }}
       >
         <SuggestInput
@@ -521,6 +523,20 @@ export function PartDialog({
         <MoneyInput label="Giá nhập mới nhất" value={draft.purchaseCost} onChange={(purchaseCost) => setDraft({ ...draft, purchaseCost })} />
         <NumericInput label="Tồn hiện tại" value={draft.quantity} onChange={(quantity) => setDraft({ ...draft, quantity })} />
         <NumericInput label="Tồn tối thiểu" value={draft.minimumStock} onChange={(minimumStock) => setDraft({ ...draft, minimumStock })} />
+        
+        {isNewPart && draft.quantity > 0 && (
+          <Labeled label="Trạng thái nhập kho ban đầu" className="md:col-span-2">
+            <select 
+              className="field" 
+              value={initialStatus} 
+              onChange={(e) => setInitialStatus(e.target.value as "importing" | "imported")}
+            >
+              <option value="importing">Đang nhập (chưa cộng vào kho)</option>
+              <option value="imported">Đã nhập (cộng vào kho ngay)</option>
+            </select>
+          </Labeled>
+        )}
+        
         <label className="md:col-span-2">
           <span className="label">Ghi chú</span>
           <textarea className="field min-h-20 py-3" value={draft.notes ?? ""} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} />

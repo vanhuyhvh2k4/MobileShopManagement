@@ -390,12 +390,13 @@ export function App() {
     }
   }
 
-  async function savePart(part: Part) {
+  async function savePart(part: Part, initialStatus?: "importing" | "imported") {
     const lockKey = `part:${part.id}`;
     if (!beginOperation(lockKey)) return;
     const existingPart = parts.find((item) => item.id === part.id);
     const isNewPart = !existingPart;
     const quantityDelta = Number(part.quantity || 0) - Number(existingPart?.quantity ?? 0);
+    const importStatus = initialStatus ?? "imported"; // Mặc định là "imported" nếu không truyền vào
     const initialImport: PartImport | null =
       isNewPart && Number(part.quantity || 0) > 0
         ? {
@@ -406,7 +407,7 @@ export function App() {
             importDateTime: new Date().toISOString(),
             supplier: part.supplier,
             notes: part.notes ? `Nhập ban đầu: ${part.notes}` : "Nhập kho ban đầu",
-            status: "imported"
+            status: importStatus
           }
         : null;
     const stockAdjustment: PartImport | null =
@@ -426,12 +427,18 @@ export function App() {
           }
         : null;
     const historyEntry = initialImport ?? stockAdjustment;
+    
+    // Điều chỉnh part.quantity dựa trên trạng thái
+    const finalPart = isNewPart && initialImport?.status === "importing" 
+      ? { ...part, quantity: 0 } // Nếu đang nhập thì không cộng vào tồn kho
+      : part;
+    
     try {
-      await remoteUpsert.part(part);
+      await remoteUpsert.part(finalPart);
       if (historyEntry) await remoteUpsert.partImport(historyEntry);
-      setParts((current) => [...current.filter((item) => item.id !== part.id), part]);
+      setParts((current) => [...current.filter((item) => item.id !== finalPart.id), finalPart]);
       if (historyEntry) setPartImports((current) => [historyEntry, ...current]);
-      await writeLog(isNewPart ? "create" : "update", "parts", part.id, `${isNewPart ? "Tạo" : "Cập nhật"} linh kiện ${part.name}`);
+      await writeLog(isNewPart ? "create" : "update", "parts", finalPart.id, `${isNewPart ? "Tạo" : "Cập nhật"} linh kiện ${finalPart.name}`);
       setSyncMessage("Đã ghi linh kiện lên Supabase");
       setPartDraft(null);
     } catch (error) {
