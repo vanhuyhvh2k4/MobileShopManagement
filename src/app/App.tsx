@@ -405,7 +405,8 @@ export function App() {
             unitCost: Number(part.purchaseCost || 0),
             importDateTime: new Date().toISOString(),
             supplier: part.supplier,
-            notes: part.notes ? `Nhập ban đầu: ${part.notes}` : "Nhập kho ban đầu"
+            notes: part.notes ? `Nhập ban đầu: ${part.notes}` : "Nhập kho ban đầu",
+            status: "imported"
           }
         : null;
     const stockAdjustment: PartImport | null =
@@ -420,7 +421,8 @@ export function App() {
             notes:
               quantityDelta > 0
                 ? `Điều chỉnh tăng tồn kho từ ${existingPart?.quantity ?? 0} lên ${part.quantity}`
-                : `Điều chỉnh giảm tồn kho từ ${existingPart?.quantity ?? 0} xuống ${part.quantity}`
+                : `Điều chỉnh giảm tồn kho từ ${existingPart?.quantity ?? 0} xuống ${part.quantity}`,
+            status: "imported"
           }
         : null;
     const historyEntry = initialImport ?? stockAdjustment;
