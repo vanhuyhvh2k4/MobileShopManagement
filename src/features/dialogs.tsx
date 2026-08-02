@@ -525,16 +525,18 @@ export function PartDialog({
         <NumericInput label="Tồn tối thiểu" value={draft.minimumStock} onChange={(minimumStock) => setDraft({ ...draft, minimumStock })} />
         
         {isNewPart && draft.quantity > 0 && (
-          <Labeled label="Trạng thái nhập kho ban đầu" className="md:col-span-2">
-            <select 
-              className="field" 
-              value={initialStatus} 
-              onChange={(e) => setInitialStatus(e.target.value as "importing" | "imported")}
-            >
-              <option value="importing">Đang nhập (chưa cộng vào kho)</option>
-              <option value="imported">Đã nhập (cộng vào kho ngay)</option>
-            </select>
-          </Labeled>
+          <div className="md:col-span-2">
+            <Labeled label="Trạng thái nhập kho ban đầu">
+              <select 
+                className="field" 
+                value={initialStatus} 
+                onChange={(e) => setInitialStatus(e.target.value as "importing" | "imported")}
+              >
+                <option value="importing">Đang nhập (chưa cộng vào kho)</option>
+                <option value="imported">Đã nhập (cộng vào kho ngay)</option>
+              </select>
+            </Labeled>
+          </div>
         )}
         
         <label className="md:col-span-2">
