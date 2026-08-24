@@ -28,6 +28,8 @@ export const editablePhoneStatuses: PhoneStatus[] = [
   "Ready For Sale"
 ];
 
+export const repairWorkflowStatuses: PhoneStatus[] = ["Waiting Inspection", "Waiting Repair", "Repairing"];
+
 export const preRepairStatuses: PhoneStatus[] = ["Purchased", "Waiting Inspection"];
 export const stockReservedRepairStatuses: PhoneStatus[] = ["Waiting Repair", "Repairing"];
 

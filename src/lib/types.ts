@@ -23,6 +23,7 @@ export type Phone = {
   purchasePrice: number;
   purchaseDeposit?: number;
   shippingFee?: number;
+  askingPrice?: number;
   purchaseDate: string;
   status: PhoneStatus;
   notes?: string;

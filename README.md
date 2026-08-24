@@ -30,7 +30,9 @@ Mở URL Vite hiển thị trong terminal. Ứng dụng sẽ tạo dữ liệu m
 7. Với bản có địa chỉ khách hàng, trạng thái vận chuyển, ngày giờ bán và tiền cọc, chạy thêm `supabase/migrations/005_add_customer_address.sql`, `supabase/migrations/006_add_sale_delivery_status.sql` và `supabase/migrations/007_add_sale_datetime_deposit.sql`.
 8. Với bản quản lý nhập kho linh kiện nhiều lần/nhiều giá, chạy thêm `supabase/migrations/008_add_part_imports.sql`.
 9. Với bản luồng nhập máy có tiền cọc và trạng thái chờ kiểm tra, chạy thêm `supabase/migrations/009_add_phone_purchase_deposit_and_waiting_inspection.sql`.
-10. Với bản log hệ thống và thùng rác/soft delete, chạy thêm `supabase/migrations/010_add_soft_delete_and_app_logs.sql`.
+10. Với bản log hệ thống và thùng rác, chạy thêm `supabase/migrations/010_add_soft_delete_and_app_logs.sql`.
+11. Với bản trạng thái từng phiếu nhập linh kiện, chạy thêm `supabase/migrations/011_add_part_import_status.sql`.
+12. Với bản giá bán dự kiến theo từng máy, chạy thêm `supabase/migrations/012_add_phone_asking_price.sql`.
 
 Giao diện đọc/ghi trực tiếp với Supabase khi `.env` đã cấu hình và người dùng đã đăng nhập bằng Supabase Auth. Ứng dụng không còn lưu dữ liệu vào IndexedDB.
 
@@ -61,11 +63,13 @@ Sau khi đăng nhập, thiết bị đó được giữ phiên tối đa 2 ngày
 
 - Tổng quan chỉ số và biểu đồ theo tháng
 - Màn hình đăng nhập và giữ phiên 2 ngày theo từng thiết bị
-- Nhập điện thoại cũ với hãng, model, tên người mua, giá mua, tiền cọc, phí vận chuyển, tình trạng, ghi chú và ảnh sản phẩm
-- CRUD danh mục linh kiện, nhập kho nhiều lần/nhiều giá, trang lịch sử nhập có xoá phiếu và cảnh báo sắp hết
+- Mục nhập điện thoại riêng cho máy chờ nhận, gồm thêm máy nhập, sửa thông tin nhập, đánh dấu đã nhận và xoá phiếu nhập máy
+- Mục kiểm tra & sửa chữa riêng cho máy chờ kiểm tra/chờ sửa/đang sửa, gồm thay linh kiện, thêm/xoá linh kiện sửa chữa và chuyển máy sang sẵn sàng bán
+- Mục sẵn sàng bán riêng để set giá bán dự kiến, đưa máy về chờ sửa hoặc chuyển sang form bán hàng
+- CRUD danh mục linh kiện, nhập kho nhiều lần/nhiều giá, trạng thái từng phiếu nhập, trang lịch sử nhập có xoá phiếu và cảnh báo sắp hết
 - Chọn linh kiện thay thế cho từng điện thoại và tự trừ tồn kho
 - Tự tính giá nhập máy, phí vận chuyển, chi phí thay linh kiện, công sửa và tổng vốn
-- Cập nhật giá bán ra ở màn bán hàng, lưu tiền cọc, ngày giờ bán, khách hàng/địa chỉ và trạng thái vận chuyển
+- Bán hàng lưu tiền cọc, ngày giờ bán, khách hàng/địa chỉ và trạng thái vận chuyển
 - Đơn không nhận hàng không tính vào doanh thu/lợi nhuận và tự chuyển máy lại về sẵn sàng bán
 - Lịch sử mua của khách hàng
 - Log hệ thống trong Cài đặt

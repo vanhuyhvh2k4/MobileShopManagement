@@ -9,7 +9,6 @@ import {
   PackagePlus,
   PanelLeft,
   Pencil,
-  Plus,
   Search,
   Smartphone,
   Sun,
@@ -68,8 +67,8 @@ import {
   logActionLabels,
   loginDurationMs,
   preRepairStatuses,
+  repairWorkflowStatuses,
   statusLabels,
-  statuses,
   stockReservedRepairStatuses
 } from "../domain/constants";
 import { blankPart, blankPartImport, blankPhone } from "../domain/factories";
@@ -123,6 +122,8 @@ export function App() {
   const [partDraft, setPartDraft] = useState<Part | null>(null);
   const [partImportDraft, setPartImportDraft] = useState<{ part: Part; partImport: PartImport } | null>(null);
   const [repairPhone, setRepairPhone] = useState<Phone | null>(null);
+  const [salePhoneId, setSalePhoneId] = useState("");
+  const [salePriceDraft, setSalePriceDraft] = useState(0);
   const [repairSaving, setRepairSaving] = useState(false);
   const [syncMessage, setSyncMessage] = useState(supabase ? "Đang kết nối Supabase..." : "Chưa cấu hình Supabase");
   const searchRef = useRef<HTMLInputElement>(null);
@@ -641,6 +642,38 @@ export function App() {
     await updatePartImport(part, updatedImport, partImport);
   }
 
+  async function deleteRepairPartFromPhone(repairPart: RepairPart) {
+    const part = parts.find((item) => item.id === repairPart.partId);
+    const confirmMessage = part
+      ? `Xoá ${repairPart.quantity} ${part.name} khỏi mục sửa chữa? Hệ thống sẽ hoàn lại số lượng này vào kho.`
+      : `Xoá linh kiện này khỏi mục sửa chữa? Không tìm thấy linh kiện trong kho nên hệ thống chỉ xoá chi phí sửa chữa.`;
+    if (!window.confirm(confirmMessage)) return;
+
+    const lockKeys = [`repair-part:${repairPart.id}`, ...(part ? [`part:${part.id}`] : [])];
+    if (!beginOperations(lockKeys)) return;
+    const updatedPart = part
+      ? {
+          ...part,
+          quantity: part.quantity + Number(repairPart.quantity || 0)
+        }
+      : undefined;
+    try {
+      await softDeleteRemoteRow("repair_parts", repairPart.id);
+      if (updatedPart) await remoteUpsert.part(updatedPart);
+      setRepairParts((current) => current.filter((item) => item.id !== repairPart.id));
+      if (updatedPart) {
+        setParts((current) => current.map((item) => (item.id === updatedPart.id ? updatedPart : item)));
+      }
+      await writeLog("delete", "repair_parts", repairPart.id, `Xoá linh kiện sửa chữa ${part?.name ?? repairPart.partId}`);
+      setSyncMessage(updatedPart ? "Đã xoá linh kiện sửa chữa và hoàn lại kho" : "Đã xoá linh kiện sửa chữa");
+      await refreshAuditState();
+    } catch (error) {
+      reportSyncError(error);
+    } finally {
+      finishOperations(lockKeys);
+    }
+  }
+
   async function deletePhone(phone: Phone) {
     const lockKey = `delete-phone:${phone.id}`;
     const phoneRepairs = repairs.filter((repair) => repair.phoneId === phone.id);
@@ -949,6 +982,22 @@ export function App() {
     }
   }
 
+  async function updatePhoneAskingPrice(phone: Phone, askingPrice: number) {
+    const lockKey = `phone-price:${phone.id}`;
+    if (!beginOperation(lockKey)) return;
+    const updatedPhone = { ...phone, askingPrice: Number(askingPrice || 0), updatedAt: new Date().toISOString() };
+    try {
+      await remoteUpsert.phone(updatedPhone);
+      setPhones((current) => current.map((item) => (item.id === updatedPhone.id ? updatedPhone : item)));
+      await writeLog("update", "phones", phone.id, `Cập nhật giá bán dự kiến ${phone.brand} ${phone.model}`);
+      setSyncMessage("Đã cập nhật giá bán dự kiến");
+    } catch (error) {
+      reportSyncError(error);
+    } finally {
+      finishOperation(lockKey);
+    }
+  }
+
   async function saveRepair(input: {
     phone: Phone;
     description: string;
@@ -1180,10 +1229,6 @@ export function App() {
                 placeholder="Tìm IMEI, model, hãng, khách hàng, trạng thái"
               />
             </div>
-            <button className="btn-primary" onClick={() => setPhoneDraft(blankPhone())}>
-              <Plus size={18} />
-              <span className="hidden sm:inline">Thêm máy</span>
-            </button>
             <button
               className="btn-secondary"
               aria-label="Bật/tắt chế độ tối"
@@ -1214,9 +1259,19 @@ export function App() {
           {view === "dashboard" && (
             <Dashboard metrics={metrics} chartData={chartData} settings={settings} parts={parts} />
           )}
+          {view === "intake" && (
+            <PhoneIntakeView
+              phones={phones.filter((phone) => phone.status === "Purchased")}
+              settings={settings}
+              onCreate={() => setPhoneDraft(blankPhone())}
+              onEdit={setPhoneDraft}
+              onReceive={(phone) => void updatePhoneStatus(phone, "Waiting Inspection", "Đã chuyển máy sang chờ kiểm tra")}
+              onDelete={deletePhone}
+            />
+          )}
           {view === "phones" && (
             <PhonesView
-              phones={filteredPhones}
+              phones={filteredPhones.filter((phone) => repairWorkflowStatuses.includes(phone.status))}
               faults={faults}
               repairs={repairs}
               repairParts={repairParts}
@@ -1224,12 +1279,27 @@ export function App() {
               expenses={expenses}
               settings={settings}
               deletedRows={trashFor(["phones"])}
-              onEdit={setPhoneDraft}
               onRepair={setRepairPhone}
-              onReceive={(phone) => void updatePhoneStatus(phone, "Waiting Inspection", "Đã chuyển máy sang chờ kiểm tra")}
               onRepairDone={(phone) => void updatePhoneStatus(phone, "Ready For Sale", "Đã chuyển máy sang sẵn sàng bán")}
               onRestoreDeleted={restoreDeletedRow}
               onDelete={deletePhone}
+              onDeleteRepairPart={deleteRepairPartFromPhone}
+            />
+          )}
+          {view === "ready" && (
+            <ReadyForSaleView
+              phones={phones.filter((phone) => phone.status === "Ready For Sale" || phone.status === "Reserved")}
+              repairs={repairs}
+              repairParts={repairParts}
+              expenses={expenses}
+              settings={settings}
+              onSetPhonePrice={updatePhoneAskingPrice}
+              onReturnToRepair={(phone) => void updatePhoneStatus(phone, "Waiting Repair", "Đã đưa máy về chờ sửa")}
+              onSell={(phone, askingPrice) => {
+                setSalePhoneId(phone.id);
+                setSalePriceDraft(askingPrice);
+                setView("sales");
+              }}
             />
           )}
           {view === "parts" && (
@@ -1267,6 +1337,8 @@ export function App() {
               onDelete={deleteSale}
               onRestoreDeleted={restoreDeletedRow}
               onUpdateDeliveryStatus={updateSaleDeliveryStatus}
+              preferredPhoneId={salePhoneId}
+              preferredSalePrice={salePriceDraft}
               onSave={saveSale}
             />
           )}
@@ -1608,6 +1680,189 @@ function Dashboard({
   );
 }
 
+function PhoneIntakeView({
+  phones,
+  settings,
+  onCreate,
+  onEdit,
+  onReceive,
+  onDelete
+}: {
+  phones: Phone[];
+  settings: Settings;
+  onCreate: () => void;
+  onEdit: (phone: Phone) => void;
+  onReceive: (phone: Phone) => void;
+  onDelete: (phone: Phone) => void;
+}) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const filteredPhones = phones
+    .filter((phone) => {
+      const text = [phone.brand, phone.model, phone.sellerName, phone.sellerPhone, phone.imei1, phone.notes]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return text.includes(searchTerm.toLowerCase());
+    })
+    .sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate));
+  const paginatedPhones = paginate(filteredPhones, page, pageSize);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, pageSize]);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Nhập điện thoại</h2>
+          <p className="text-sm text-slate-500">{filteredPhones.length}/{phones.length} máy đang chờ nhận</p>
+        </div>
+        <button className="btn-primary" onClick={onCreate}>
+          <PackagePlus size={18} />
+          Thêm máy nhập
+        </button>
+      </div>
+
+      <div className="card p-4">
+        <input
+          className="field"
+          value={searchTerm}
+          onChange={(event) => setSearchTerm(event.target.value)}
+          placeholder="Tìm hãng, model, người mua, số điện thoại, IMEI, ghi chú"
+        />
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="space-y-3 p-3 md:hidden">
+          {paginatedPhones.items.map((phone) => (
+            <div className="rounded-lg border bg-background p-3" key={phone.id}>
+              <div className="flex gap-3">
+                {phone.imageFront ? (
+                  <img className="h-16 w-16 shrink-0 rounded-md object-cover" src={phone.imageFront} alt={`${phone.brand} ${phone.model}`} />
+                ) : (
+                  <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-md bg-muted text-slate-400">
+                    <Smartphone size={22} />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="truncate font-semibold">
+                        {phone.brand} {phone.model}
+                      </h3>
+                      <p className="truncate text-xs text-slate-500">
+                        {phone.sellerName ? `Người mua: ${phone.sellerName}` : "Chưa có tên người mua"}
+                      </p>
+                    </div>
+                    <StatusPill status={phone.status} />
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">Ngày nhập: {formatDateTimeText(phone.purchaseDate)}</p>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                <Stat label="Giá nhập" value={currency(phone.purchasePrice, settings.currency)} />
+                <Stat label="Tiền cọc" value={currency(phone.purchaseDeposit ?? 0, settings.currency)} />
+                <Stat label="Vận chuyển" value={currency(phone.shippingFee ?? 0, settings.currency)} />
+              </div>
+              <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+                <button className="btn-secondary w-full" onClick={() => onReceive(phone)}>
+                  Đã nhận
+                </button>
+                <ActionMenu
+                  label={`Thao tác nhập ${phone.brand} ${phone.model}`}
+                  items={[
+                    { label: "Sửa thông tin nhập", icon: <Pencil size={16} />, onClick: () => onEdit(phone) },
+                    { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(phone) }
+                  ]}
+                />
+              </div>
+            </div>
+          ))}
+          {paginatedPhones.items.length === 0 && <div className="py-6 text-center text-sm text-slate-500">Chưa có máy đang chờ nhận</div>}
+        </div>
+
+        <div className="hidden overflow-auto md:block">
+          <table className="w-full min-w-[980px] text-sm">
+            <thead className="bg-muted text-left">
+              <tr>
+                {["Ảnh", "Điện thoại", "Người mua", "Ngày nhập", "Giá nhập", "Tiền cọc", "Vận chuyển", "Trạng thái", ""].map((header) => (
+                  <th className="px-4 py-3 font-semibold" key={header}>
+                    {header}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {paginatedPhones.items.map((phone) => (
+                <tr className="border-t" key={phone.id}>
+                  <td className="px-4 py-3">
+                    {phone.imageFront ? (
+                      <img className="h-14 w-14 rounded-md object-cover" src={phone.imageFront} alt={`${phone.brand} ${phone.model}`} />
+                    ) : (
+                      <div className="flex h-14 w-14 items-center justify-center rounded-md bg-muted text-slate-400">
+                        <Smartphone size={20} />
+                      </div>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium">
+                      {phone.brand} {phone.model}
+                    </div>
+                    {phone.imei1 && <div className="text-xs text-slate-500">IMEI: {phone.imei1}</div>}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div>{phone.sellerName || "-"}</div>
+                    {phone.sellerPhone && <div className="text-xs text-slate-500">{phone.sellerPhone}</div>}
+                  </td>
+                  <td className="px-4 py-3">{formatDateTimeText(phone.purchaseDate)}</td>
+                  <td className="px-4 py-3">{currency(phone.purchasePrice, settings.currency)}</td>
+                  <td className="px-4 py-3">{currency(phone.purchaseDeposit ?? 0, settings.currency)}</td>
+                  <td className="px-4 py-3">{currency(phone.shippingFee ?? 0, settings.currency)}</td>
+                  <td className="px-4 py-3">
+                    <StatusPill status={phone.status} />
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div className="flex justify-end gap-2">
+                      <button className="btn-secondary" onClick={() => onReceive(phone)}>
+                        Đã nhận
+                      </button>
+                      <ActionMenu
+                        label={`Thao tác nhập ${phone.brand} ${phone.model}`}
+                        items={[
+                          { label: "Sửa thông tin nhập", icon: <Pencil size={16} />, onClick: () => onEdit(phone) },
+                          { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => onDelete(phone) }
+                        ]}
+                      />
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {paginatedPhones.items.length === 0 && (
+                <tr>
+                  <td className="px-4 py-6 text-center text-slate-500" colSpan={9}>
+                    Chưa có máy đang chờ nhận
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <PaginationControls
+          page={paginatedPhones.page}
+          totalPages={paginatedPhones.totalPages}
+          pageSize={pageSize}
+          totalItems={filteredPhones.length}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
+      </div>
+    </div>
+  );
+}
+
 function PhonesView(props: {
   phones: Phone[];
   faults: { phoneId: string; faultName: string }[];
@@ -1617,12 +1872,11 @@ function PhonesView(props: {
   expenses: Expense[];
   settings: Settings;
   deletedRows: DeletedRow[];
-  onEdit: (phone: Phone) => void;
   onRepair: (phone: Phone) => void;
-  onReceive: (phone: Phone) => void;
   onRepairDone: (phone: Phone) => void;
   onRestoreDeleted: (row: DeletedRow) => void;
   onDelete: (phone: Phone) => void;
+  onDeleteRepairPart: (repairPart: RepairPart) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
@@ -1682,8 +1936,8 @@ function PhonesView(props: {
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Quản lý điện thoại</h2>
-          <p className="text-sm text-slate-500">{filteredPhones.length}/{props.phones.length} bản ghi</p>
+          <h2 className="text-lg font-semibold">Kiểm tra & sửa chữa</h2>
+          <p className="text-sm text-slate-500">{filteredPhones.length}/{props.phones.length} máy trong luồng kiểm tra/sửa chữa</p>
         </div>
       </div>
 
@@ -1713,7 +1967,7 @@ function PhonesView(props: {
           </select>
           <select className="field" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
             <option value="all">Tất cả trạng thái</option>
-            {statuses.map((status) => (
+            {repairWorkflowStatuses.map((status) => (
               <option key={status} value={status}>
                 {statusLabels[status]}
               </option>
@@ -1782,11 +2036,6 @@ function PhonesView(props: {
                   <Stat label="Tổng vốn" value={currency(totalCost, props.settings.currency)} />
                 </div>
                 <div className="mt-3 grid gap-2">
-                  {phone.status === "Purchased" && (
-                    <button className="btn-secondary w-full" onClick={() => props.onReceive(phone)}>
-                      Đã nhận
-                    </button>
-                  )}
                   {phone.status === "Waiting Inspection" && (
                     <button className="btn-secondary w-full" onClick={() => props.onRepair(phone)}>
                       <Wrench size={16} />
@@ -1807,7 +2056,6 @@ function PhonesView(props: {
                       label={`Thao tác ${phone.brand} ${phone.model}`}
                       align="full"
                       items={[
-                        { label: "Sửa", icon: <Pencil size={16} />, onClick: () => props.onEdit(phone) },
                         { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => props.onDelete(phone) }
                       ]}
                     />
@@ -1879,11 +2127,6 @@ function PhonesView(props: {
                   <td className="px-4 py-3 font-semibold">{currency(totalCost, props.settings.currency)}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
-                      {phone.status === "Purchased" && (
-                        <button className="btn-secondary" onClick={() => props.onReceive(phone)}>
-                          Đã nhận
-                        </button>
-                      )}
                       {phone.status === "Waiting Inspection" && (
                         <button className="btn-secondary" onClick={() => props.onRepair(phone)}>
                           <Wrench size={16} />
@@ -1902,7 +2145,6 @@ function PhonesView(props: {
                       <ActionMenu
                         label={`Thao tác ${phone.brand} ${phone.model}`}
                         items={[
-                          { label: "Sửa", icon: <Pencil size={16} />, onClick: () => props.onEdit(phone) },
                           { label: "Xoá", icon: <Trash2 size={16} />, destructive: true, onClick: () => props.onDelete(phone) }
                         ]}
                       />
@@ -1944,6 +2186,7 @@ function PhonesView(props: {
             setDetailPhone(null);
             props.onRepair(detailPhone);
           }}
+          onDeleteRepairPart={props.onDeleteRepairPart}
           onClose={() => setDetailPhone(null)}
         />
       )}
@@ -1960,6 +2203,7 @@ function PhoneDetailModal({
   expenses,
   settings,
   onAddRepair,
+  onDeleteRepairPart,
   onClose
 }: {
   phone: Phone;
@@ -1970,6 +2214,7 @@ function PhoneDetailModal({
   expenses: Expense[];
   settings: Settings;
   onAddRepair: () => void;
+  onDeleteRepairPart: (repairPart: RepairPart) => void;
   onClose: () => void;
 }) {
   const repairIds = new Set(repairs.map((repair) => repair.id));
@@ -2066,7 +2311,17 @@ function PhoneDetailModal({
                           <p className="font-medium">{part?.name ?? "Linh kiện không rõ"}</p>
                           <p className="text-xs text-slate-500">{part?.brand || "Không rõ hãng"} - SL {repairPart.quantity}</p>
                         </div>
-                        <span className="text-sm font-semibold">{currency(repairPart.quantity * repairPart.unitCost, settings.currency)}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-semibold">{currency(repairPart.quantity * repairPart.unitCost, settings.currency)}</span>
+                          <button
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md border text-red-600 hover:bg-red-50 dark:hover:bg-red-950/30"
+                            type="button"
+                            aria-label={`Xoá ${part?.name ?? "linh kiện"} khỏi sửa chữa`}
+                            onClick={() => onDeleteRepairPart(repairPart)}
+                          >
+                            <Trash2 size={15} />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -2575,6 +2830,116 @@ function PartImportsView({
   );
 }
 
+function ReadyForSaleView({
+  phones,
+  repairs,
+  repairParts,
+  expenses,
+  settings,
+  onSetPhonePrice,
+  onReturnToRepair,
+  onSell
+}: {
+  phones: Phone[];
+  repairs: Repair[];
+  repairParts: RepairPart[];
+  expenses: Expense[];
+  settings: Settings;
+  onSetPhonePrice: (phone: Phone, askingPrice: number) => void;
+  onReturnToRepair: (phone: Phone) => void;
+  onSell: (phone: Phone, askingPrice: number) => void;
+}) {
+  const [searchTerm, setSearchTerm] = useState("");
+  const [priceDrafts, setPriceDrafts] = useState<Record<string, number>>({});
+  const filteredPhones = phones
+    .filter((phone) => {
+      const text = [phone.brand, phone.model, phone.imei1, phone.sellerName, phone.notes, statusLabels[phone.status]]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return text.includes(searchTerm.toLowerCase());
+    })
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Sẵn sàng bán</h2>
+          <p className="text-sm text-slate-500">{filteredPhones.length}/{phones.length} máy có thể bán</p>
+        </div>
+      </div>
+
+      <div className="card p-4">
+        <input
+          className="field"
+          value={searchTerm}
+          onChange={(event) => setSearchTerm(event.target.value)}
+          placeholder="Tìm máy, IMEI, người nhập, trạng thái"
+        />
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {filteredPhones.map((phone) => {
+          const cost = phoneCost(phone, repairs, repairParts, expenses);
+          const priceValue = priceDrafts[phone.id] ?? phone.askingPrice ?? 0;
+          const expectedProfit = priceValue - cost;
+          return (
+            <div className="card p-4" key={phone.id}>
+              <div className="flex gap-3">
+                {phone.imageFront ? (
+                  <img className="h-20 w-20 shrink-0 rounded-md object-cover" src={phone.imageFront} alt={`${phone.brand} ${phone.model}`} />
+                ) : (
+                  <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-md bg-muted text-slate-400">
+                    <Smartphone size={24} />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <h3 className="truncate font-semibold">
+                        {phone.brand} {phone.model}
+                      </h3>
+                      {phone.imei1 && <p className="truncate text-xs text-slate-500">IMEI: {phone.imei1}</p>}
+                    </div>
+                    <StatusPill status={phone.status} />
+                  </div>
+                  {phone.notes && <p className="mt-1 line-clamp-2 text-xs text-slate-500">{phone.notes}</p>}
+                </div>
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                <Stat label="Tổng vốn" value={currency(cost, settings.currency)} />
+                <Stat label="Lãi dự kiến" value={currency(expectedProfit, settings.currency)} warn={expectedProfit < 0} />
+              </div>
+
+              <div className="mt-3 grid gap-2">
+                <MoneyInput
+                  placeholder="Giá bán dự kiến"
+                  value={priceValue}
+                  onChange={(askingPrice) => setPriceDrafts((current) => ({ ...current, [phone.id]: askingPrice }))}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <button className="btn-secondary w-full" type="button" onClick={() => onSetPhonePrice(phone, priceValue)}>
+                    Lưu giá
+                  </button>
+                  <button className="btn-primary w-full" type="button" onClick={() => onSell(phone, priceValue)}>
+                    Bán hàng
+                  </button>
+                </div>
+                <button className="btn-secondary w-full text-amber-700 hover:bg-amber-50 dark:text-amber-200 dark:hover:bg-amber-950/30" type="button" onClick={() => onReturnToRepair(phone)}>
+                  Đưa về chờ sửa
+                </button>
+              </div>
+            </div>
+          );
+        })}
+        {filteredPhones.length === 0 && <div className="py-8 text-center text-sm text-slate-500 md:col-span-2 xl:col-span-3">Chưa có máy sẵn sàng bán.</div>}
+      </div>
+    </div>
+  );
+}
+
 function SalesView({
   phones,
   customers,
@@ -2587,6 +2952,8 @@ function SalesView({
   onDelete,
   onRestoreDeleted,
   onUpdateDeliveryStatus,
+  preferredPhoneId,
+  preferredSalePrice,
   onSave
 }: {
   phones: Phone[];
@@ -2600,6 +2967,8 @@ function SalesView({
   onDelete: (sale: Sale) => void;
   onRestoreDeleted: (row: DeletedRow) => void;
   onUpdateDeliveryStatus: (sale: Sale, status: SaleDeliveryStatus) => void;
+  preferredPhoneId?: string;
+  preferredSalePrice?: number;
   onSave: (input: {
     phoneId: string;
     customerName: string;
@@ -2688,6 +3057,18 @@ function SalesView({
     const query = [draft.customerName, draft.customerPhone].filter(Boolean).map(normalizeCustomerIdentity).join(" ");
     return query.length >= 2 && text.includes(query);
   });
+
+  useEffect(() => {
+    if (!preferredPhoneId) return;
+    const phone = phones.find((item) => item.id === preferredPhoneId);
+    if (!phone || !["Ready For Sale", "Reserved"].includes(phone.status)) return;
+    setDraft((current) => ({
+      ...current,
+      phoneId: phone.id,
+      salePrice: preferredSalePrice || phone.askingPrice || current.salePrice
+    }));
+  }, [preferredPhoneId, preferredSalePrice, phones]);
+
   async function submit() {
     if (savingSale) return;
     setSavingSale(true);
@@ -2717,8 +3098,16 @@ function SalesView({
           void submit();
         }}
       >
-        <h2 className="text-lg font-semibold">Cập nhật giá bán ra</h2>
-        <select className="field" value={draft.phoneId} onChange={(e) => setDraft({ ...draft, phoneId: e.target.value })}>
+        <h2 className="text-lg font-semibold">Bán hàng</h2>
+        <select
+          className="field"
+          value={draft.phoneId}
+          onChange={(e) => {
+            const phone = phones.find((item) => item.id === e.target.value);
+            setDraft({ ...draft, phoneId: e.target.value, salePrice: phone?.askingPrice ?? draft.salePrice });
+          }}
+        >
+          <option value="">Chọn máy để bán</option>
           {sellablePhones.map((phone) => (
             <option key={phone.id} value={phone.id}>
               {phone.brand} {phone.model} - vốn {currency(phoneCost(phone, repairs, repairParts, expenses), settings.currency)}

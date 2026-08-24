@@ -14,6 +14,7 @@ create table if not exists public.phones (
   purchase_price numeric not null default 0,
   purchase_deposit numeric not null default 0,
   shipping_fee numeric not null default 0,
+  asking_price numeric not null default 0,
   purchase_date date not null,
   status text not null check (
     status in ('Purchased', 'Waiting Inspection', 'Waiting Repair', 'Repairing', 'Ready For Sale', 'Reserved', 'Sold')
